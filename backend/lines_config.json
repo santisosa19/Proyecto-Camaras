@@ -1,0 +1,20 @@
+{
+  "camara_prueba_marathon": {
+    "lines": [
+      {
+        "name": "main_gate",
+        "p1": [
+          1022,
+          154
+        ],
+        "p2": [
+          1023,
+          491
+        ],
+        "direction": "both"
+      }
+    ],
+    "entry_direction": "positive",
+    "configured_at": "2026-02-18T15:36:37.606403"
+  }
+}
