@@ -90,9 +90,10 @@ async def get_hourly_metrics(
         "metrics": [
             {
                 "hour": m.hour,
+                "local_id": m.local_id,
                 "total_visitors": m.total_visitors,
                 "peak_count": m.peak_count,
-                "avg_dwell_time": m.avg_dwell_time
+                "avg_occupancy": m.avg_dwell_time
             }
             for m in metrics
         ]

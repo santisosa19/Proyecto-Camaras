@@ -51,6 +51,8 @@ class DetectionSnapshotItem(BaseModel):
     camera_id: str
     camera_name: str | None = None
     rtsp_url: str | None = None
+    branch_id: str | None = None
+    branch_name: str | None = None
     timestamp: datetime | None = None
     person_count: int = 0
     detections_data: list[dict[str, Any]] = Field(default_factory=list)
@@ -106,6 +108,8 @@ async def ingest_detections(
         latest_by_camera: dict[str, DetectionSnapshotItem] = {}
 
         for item in payload.items:
+            if item.person_count <= 0:
+                continue
             ts = item.timestamp or datetime.utcnow()
             detection_rows.append(
                 Detection(
@@ -123,6 +127,9 @@ async def ingest_detections(
                 prev_ts = prev.timestamp or datetime.min
                 if ts >= prev_ts:
                     latest_by_camera[item.camera_id] = item
+
+        if not detection_rows:
+            return {"inserted": 0, "updated_cameras": 0}
 
         db.add_all(detection_rows)
 
@@ -148,6 +155,13 @@ async def ingest_detections(
                 status_row.total_frames = item.total_frames
             if item.error_count is not None:
                 status_row.error_count = item.error_count
+            existing_meta = status_row.camera_metadata if isinstance(status_row.camera_metadata, dict) else {}
+            if item.branch_id:
+                existing_meta["branch_id"] = item.branch_id
+            if item.branch_name:
+                existing_meta["branch_name"] = item.branch_name
+            if existing_meta:
+                status_row.camera_metadata = existing_meta
             status_row.last_frame_at = item.timestamp or datetime.utcnow()
             status_row.updated_at = datetime.utcnow()
             status_row.is_active = True

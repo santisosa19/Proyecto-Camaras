@@ -91,7 +91,7 @@ services:
       - ./backend:/app
     depends_on:
       - redis
-      - postgres
+      - postgres}
       - backend
     restart: unless-stopped
     networks:

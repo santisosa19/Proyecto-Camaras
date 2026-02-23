@@ -1,6 +1,7 @@
 """
 Aplicación principal FastAPI - Traffic Analysis System
 """
+import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -9,7 +10,7 @@ import logging
 from datetime import datetime
 
 from app.config import settings
-from app.database.connection import init_db
+from app.database.connection import DatabaseManager, get_db_context, init_db
 
 # Configurar logging
 logging.basicConfig(
@@ -17,6 +18,26 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+async def _hourly_aggregation_worker():
+    """
+    Worker periódico que agrega hourly_metrics y limpia detections de horas cerradas.
+    """
+    while True:
+        try:
+            with get_db_context() as db:
+                result = DatabaseManager.aggregate_completed_hourly_metrics(db)
+                if result["processed_hours"] > 0:
+                    logger.info(
+                        "✓ Agregación horaria: horas=%s, detections borradas=%s",
+                        result["processed_hours"],
+                        result["deleted_detections"],
+                    )
+        except Exception as exc:
+            logger.error(f"Error en agregación horaria automática: {exc}", exc_info=True)
+
+        await asyncio.sleep(60)
 
 
 # Lifecycle events
@@ -30,6 +51,10 @@ async def lifespan(app: FastAPI):
         # Inicializar base de datos
         init_db()
         logger.info("✓ Base de datos inicializada")
+
+        # Iniciar agregador horario automático
+        app.state.hourly_aggregation_task = asyncio.create_task(_hourly_aggregation_worker())
+        logger.info("✓ Worker de agregación horaria iniciado")
         
         # Aquí se pueden agregar otros servicios de inicio
         # Por ejemplo: iniciar procesadores de cámara
@@ -44,6 +69,14 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     logger.info("🛑 Apagando Traffic Analysis System...")
+
+    task = getattr(app.state, "hourly_aggregation_task", None)
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     
     # Liberar recursos aquí
     logger.info("✓ Sistema apagado")
@@ -114,7 +147,7 @@ async def get_info():
 # IMPORTAR ROUTERS
 # ============================================
 
-from app.api import cameras, ingest, metrics, processing
+from app.api import cameras, dashboard, ingest, metrics, processing
 
 # Registrar routers
 app.include_router(
@@ -139,6 +172,12 @@ app.include_router(
     ingest.router,
     prefix="/api/v1/ingest",
     tags=["ingest"]
+)
+
+app.include_router(
+    dashboard.router,
+    prefix="/api/v1/dashboard",
+    tags=["dashboard"]
 )
 
 

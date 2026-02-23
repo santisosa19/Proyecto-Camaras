@@ -1,11 +1,11 @@
 """
 Configuración de base de datos
 """
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, func, inspect, text
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import StaticPool
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, date, time, timedelta
 import logging
 
 from app.config import settings
@@ -35,10 +35,30 @@ def init_db():
     """Inicializar base de datos (crear tablas)"""
     try:
         Base.metadata.create_all(bind=engine)
+        _ensure_hourly_metrics_columns()
         logger.info("✓ Base de datos inicializada")
     except Exception as e:
         logger.error(f"Error inicializando base de datos: {e}")
         raise
+
+
+def _ensure_hourly_metrics_columns():
+    """
+    Asegura columnas nuevas en tablas existentes sin requerir migraciones manuales.
+    """
+    try:
+        inspector = inspect(engine)
+        if "hourly_metrics" not in inspector.get_table_names():
+            return
+
+        columns = {col["name"] for col in inspector.get_columns("hourly_metrics")}
+        if "local_id" not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE hourly_metrics ADD COLUMN local_id VARCHAR(50) NULL"))
+            logger.info("✓ Columna hourly_metrics.local_id creada")
+    except Exception as exc:
+        # No bloqueamos startup si la columna ya existe o el motor responde distinto.
+        logger.warning(f"No se pudo validar/crear columnas en hourly_metrics: {exc}")
 
 
 def get_db() -> Session:
@@ -273,3 +293,104 @@ class DatabaseManager:
         db.add_all(rows)
         db.commit()
         return rows
+
+    @staticmethod
+    def aggregate_completed_hourly_metrics(db: Session) -> dict:
+        """
+        Agrega detecciones por hora (horas cerradas), guarda en hourly_metrics y
+        elimina detections utilizadas para reducir volumen.
+        """
+        from app.models.database import CameraStatus, CrossingEvent, Detection, HourlyMetrics
+
+        current_hour_start = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+
+        grouped = db.query(
+            Detection.camera_id.label("camera_id"),
+            func.date(Detection.timestamp).label("target_date"),
+            func.extract("hour", Detection.timestamp).label("target_hour"),
+            func.avg(Detection.person_count).label("avg_count"),
+            func.max(Detection.person_count).label("peak_count"),
+            func.count(Detection.id).label("sample_count"),
+        ).filter(
+            Detection.timestamp < current_hour_start
+        ).group_by(
+            Detection.camera_id,
+            func.date(Detection.timestamp),
+            func.extract("hour", Detection.timestamp)
+        ).all()
+
+        if not grouped:
+            return {"processed_hours": 0, "deleted_detections": 0}
+
+        camera_ids = list({row.camera_id for row in grouped})
+        status_rows = db.query(CameraStatus).filter(CameraStatus.camera_id.in_(camera_ids)).all()
+        local_by_camera: dict[str, str | None] = {}
+        for row in status_rows:
+            metadata = row.camera_metadata if isinstance(row.camera_metadata, dict) else {}
+            local_by_camera[row.camera_id] = metadata.get("branch_id") or metadata.get("local_id")
+
+        processed_hours = 0
+        deleted_detections = 0
+
+        for row in grouped:
+            camera_id = row.camera_id
+            target_date = row.target_date if isinstance(row.target_date, date) else datetime.utcnow().date()
+            target_hour = int(row.target_hour)
+            avg_count = float(row.avg_count or 0.0)
+            peak_count = int(row.peak_count or 0)
+
+            hour_start = datetime.combine(target_date, time(hour=target_hour))
+            hour_end = hour_start + timedelta(hours=1)
+
+            crossings = db.query(
+                CrossingEvent.event_type,
+                func.count(CrossingEvent.id).label("cnt")
+            ).filter(
+                CrossingEvent.camera_id == camera_id,
+                CrossingEvent.timestamp >= hour_start,
+                CrossingEvent.timestamp < hour_end
+            ).group_by(
+                CrossingEvent.event_type
+            ).all()
+
+            entries = 0
+            for c in crossings:
+                if c.event_type == "entry":
+                    entries = int(c.cnt)
+
+            hourly = db.query(HourlyMetrics).filter(
+                HourlyMetrics.camera_id == camera_id,
+                HourlyMetrics.date == target_date,
+                HourlyMetrics.hour == target_hour
+            ).first()
+
+            if hourly is None:
+                hourly = HourlyMetrics(
+                    camera_id=camera_id,
+                    local_id=local_by_camera.get(camera_id),
+                    date=target_date,
+                    hour=target_hour,
+                    total_visitors=entries,
+                    peak_count=peak_count,
+                    avg_dwell_time=avg_count,  # promedio de ocupación
+                )
+                db.add(hourly)
+            else:
+                hourly.local_id = local_by_camera.get(camera_id)
+                hourly.total_visitors = entries
+                hourly.peak_count = peak_count
+                hourly.avg_dwell_time = avg_count
+
+            deleted = db.query(Detection).filter(
+                Detection.camera_id == camera_id,
+                Detection.timestamp >= hour_start,
+                Detection.timestamp < hour_end
+            ).delete(synchronize_session=False)
+            deleted_detections += int(deleted or 0)
+            processed_hours += 1
+
+        db.commit()
+        return {
+            "processed_hours": processed_hours,
+            "deleted_detections": deleted_detections
+        }

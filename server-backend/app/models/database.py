@@ -30,11 +30,12 @@ class HourlyMetrics(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     camera_id = Column(String(50), nullable=False)
+    local_id = Column(String(50), nullable=True, index=True)
     date = Column(Date, nullable=False)
     hour = Column(Integer, nullable=False)
     total_visitors = Column(Integer, default=0)
     peak_count = Column(Integer, default=0)
-    avg_dwell_time = Column(Float, default=0.0)
+    avg_dwell_time = Column(Float, default=0.0)  # Reutilizado como promedio de ocupación por hora
     created_at = Column(DateTime, default=datetime.utcnow)
     
     __table_args__ = (

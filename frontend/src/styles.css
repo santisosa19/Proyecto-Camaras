@@ -1,0 +1,170 @@
+:root {
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  color: #101828;
+  background: radial-gradient(circle at 0 0, #d6f3f0 0, #f7f9fc 45%, #ffffff 100%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.login-wrap {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+
+.app-shell {
+  min-height: 100vh;
+}
+
+.topbar {
+  background: #0f172a;
+  color: #f8fafc;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.8rem 1.2rem;
+}
+
+.topbar nav {
+  display: flex;
+  gap: 0.9rem;
+}
+
+.topbar a {
+  color: #cbd5e1;
+  text-decoration: none;
+}
+
+.topbar a:hover {
+  color: #ffffff;
+}
+
+.right-group {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.content {
+  max-width: 1150px;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+.card {
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  background: #ffffff;
+  padding: 1rem;
+  box-shadow: 0 8px 24px rgba(2, 6, 23, 0.05);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 0.9rem;
+}
+
+.kpi h3 {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #334155;
+  font-weight: 600;
+}
+
+.kpi p {
+  margin: 0.5rem 0 0;
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.list {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.branch-card {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.branch-card h3 {
+  margin: 0;
+}
+
+.branch-metrics {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  color: #334155;
+  font-size: 0.9rem;
+}
+
+.detail-wrap {
+  display: grid;
+  gap: 0.9rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  text-align: left;
+  border-bottom: 1px solid #e2e8f0;
+  padding: 0.55rem 0.4rem;
+  font-size: 0.9rem;
+}
+
+input,
+button {
+  width: 100%;
+  font-size: 0.95rem;
+  padding: 0.65rem;
+  border-radius: 10px;
+  border: 1px solid #cbd5e1;
+}
+
+button {
+  background: #0f766e;
+  color: #ffffff;
+  border: none;
+  cursor: pointer;
+}
+
+button.ghost {
+  width: auto;
+  background: transparent;
+  border: 1px solid #334155;
+  color: #e2e8f0;
+}
+
+.login-card {
+  max-width: 380px;
+  display: grid;
+  gap: 0.7rem;
+}
+
+.login-card h1 {
+  margin: 0;
+}
+
+.login-card p {
+  margin: 0;
+  color: #475569;
+}
+
+.error {
+  color: #b42318;
+}

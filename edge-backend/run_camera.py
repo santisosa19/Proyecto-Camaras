@@ -326,6 +326,8 @@ class TrafficAnalysisSystem:
         save_to_api: bool = False,
         remote_api_base_url: str = "",
         remote_api_key: str = "",
+        branch_id: str = "",
+        branch_name: str = "",
     ):
         """
         Args:
@@ -350,6 +352,8 @@ class TrafficAnalysisSystem:
         self.save_to_api = save_to_api
         self.remote_api_base_url = remote_api_base_url.strip()
         self.remote_api_key = remote_api_key.strip()
+        self.branch_id = branch_id.strip()
+        self.branch_name = branch_name.strip()
         self.remote_ingest: RemoteIngestClient | None = None
         
         # Estadísticas
@@ -670,12 +674,16 @@ class TrafficAnalysisSystem:
         """Encolar snapshot periódico para ingesta remota."""
         if self.remote_ingest is None:
             return
+        if not detections:
+            return
 
         capture_stats = self.capture.get_stats()
         payload = {
             "camera_id": self.camera_id,
             "camera_name": self.camera_name,
             "rtsp_url": self.rtsp_url,
+            "branch_id": self.branch_id or None,
+            "branch_name": self.branch_name or None,
             "timestamp": datetime.utcnow().isoformat(),
             "person_count": len(detections),
             "detections_data": [det.to_dict() for det in detections] if detections else [],
@@ -763,6 +771,8 @@ def main():
         'save_to_api': os.getenv('SAVE_TO_API', 'true').lower() == 'true',
         'remote_api_base_url': os.getenv('REMOTE_API_BASE_URL', ''),
         'remote_api_key': os.getenv('REMOTE_API_KEY', ''),
+        'branch_id': os.getenv('BRANCH_ID', ''),
+        'branch_name': os.getenv('BRANCH_NAME', ''),
     }
     
     logger.info("=" * 60)
