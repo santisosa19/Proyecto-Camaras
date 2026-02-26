@@ -115,26 +115,6 @@ JWT_SECRET=your-secret-key-here
 - Docker & Docker Compose
 - Nginx (Reverse proxy)
 
-### 🎯 Fases del Proyecto
-
-#### ✅ Fase 1: POC (2.5 semanas)
-- [x] Captura RTSP
-- [x] Detección con YOLO
-- [x] Conteo básico
-- [x] API REST
-- [x] Dashboard simple
-
-#### 🔄 Fase 2: MVP (3 semanas)
-- [ ] Procesamiento 24/7
-- [ ] Integración Cegid
-- [ ] Dashboard completo
-- [ ] Deploy en locales
-
-#### 📈 Fase 3: Avanzado (2.5 semanas)
-- [ ] Heatmaps
-- [ ] Análisis de comportamiento
-- [ ] Reportes automáticos
-- [ ] API completa
 
 ### 👨‍💻 Desarrollo
 
@@ -167,8 +147,4 @@ npm run dev
 
 ### 🤝 Contribución
 
-Desarrollado por **Santiago Sosa** para Marathon SRL.
-
-### 📄 Licencia
-
-Propietario - Marathon SRL © 2025
+Desarrollado por **Santiago Sosa**.
