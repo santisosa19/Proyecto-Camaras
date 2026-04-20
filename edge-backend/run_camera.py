@@ -764,7 +764,7 @@ def main():
     CAMERA_CONFIG = {
         'camera_id': 'camara_prueba_marathon',
         'camera_name': 'Cámara de Prueba Marathon',
-        'rtsp_url': os.getenv('CAMERA_RTSP_URL', 'rtsp://admin:admin@192.168.0.100:554/Streaming/Channels/101'),
+        'rtsp_url': os.getenv('CAMERA_RTSP_URL', 'rtsp://admin:Marathon@192.168.0.100:554/Streaming/Channels/101'),
         'entry_direction': 'positive',  # positive = entra, negative = sale
         'show_window': True,      # True = mostrar ventana con video
         'save_to_db': os.getenv('SAVE_TO_DB', 'false').lower() == 'true',

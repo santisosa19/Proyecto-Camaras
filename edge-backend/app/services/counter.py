@@ -152,7 +152,7 @@ class PersonCounter:
         self.lines[name] = line
         logger.info(f"Línea '{name}' agregada: {p1} -> {p2}")
     
-    def update(self, detections: List[Detection]) -> Dict:
+    def update(self, detections: List[Detection], excluded_track_ids: Optional[set[int]] = None) -> Dict:
         """
         Actualizar contador con nuevas detecciones
         
@@ -163,6 +163,7 @@ class PersonCounter:
             Diccionario con estadísticas actualizadas
         """
         current_time = datetime.now()
+        excluded_track_ids = excluded_track_ids or set()
         
         # Mapear detecciones por track_id
         detection_by_track = {}
@@ -184,7 +185,7 @@ class PersonCounter:
                 
                 # Verificar cruces de línea
                 if prev_pos is not None:
-                    self._check_line_crossings(track, prev_pos, curr_pos)
+                    self._check_line_crossings(track, prev_pos, curr_pos, excluded_track_ids)
             
             else:
                 # Track sin detección - verificar edad
@@ -210,9 +211,13 @@ class PersonCounter:
         self,
         track: Track,
         prev_pos: Tuple[float, float],
-        curr_pos: Tuple[float, float]
+        curr_pos: Tuple[float, float],
+        excluded_track_ids: set[int]
     ):
         """Verificar si el track cruzó alguna línea"""
+        if track.track_id in excluded_track_ids:
+            return
+
         for line_name, line in self.lines.items():
             crossing = line.crosses(prev_pos, curr_pos)
             
