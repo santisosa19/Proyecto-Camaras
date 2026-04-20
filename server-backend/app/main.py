@@ -2,15 +2,20 @@
 Aplicación principal FastAPI - Traffic Analysis System
 """
 import asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import logging
+import time
+from contextlib import asynccontextmanager
+from datetime import datetime
+from uuid import uuid4
+
+import redis
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from contextlib import asynccontextmanager
-import logging
-from datetime import datetime
+from sqlalchemy import text
 
 from app.config import settings
-from app.database.connection import DatabaseManager, get_db_context, init_db
+from app.database.connection import DatabaseManager, engine, get_db_context, init_db
 
 # Configurar logging
 logging.basicConfig(
@@ -18,6 +23,23 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def _check_database() -> None:
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+
+
+def _check_redis() -> None:
+    client = redis.Redis.from_url(
+        settings.REDIS_URL,
+        socket_connect_timeout=2,
+        socket_timeout=2,
+    )
+    try:
+        client.ping()
+    finally:
+        client.close()
 
 
 async def _hourly_aggregation_worker():
@@ -51,6 +73,11 @@ async def lifespan(app: FastAPI):
         # Inicializar base de datos
         init_db()
         logger.info("✓ Base de datos inicializada")
+
+        if not settings.INGEST_API_KEY.strip():
+            logger.warning("INGEST_API_KEY no está configurada; la ingesta quedará abierta.")
+        if not settings.ADMIN_API_KEY.strip():
+            logger.warning("ADMIN_API_KEY no está configurada; endpoints administrativos sin protección.")
 
         # Iniciar agregador horario automático
         app.state.hourly_aggregation_task = asyncio.create_task(_hourly_aggregation_worker())
@@ -100,6 +127,40 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def request_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid4())
+    start = time.perf_counter()
+
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration_ms = (time.perf_counter() - start) * 1000
+        logger.exception(
+            "Request failed req_id=%s method=%s path=%s duration_ms=%.2f",
+            request_id,
+            request.method,
+            request.url.path,
+            duration_ms,
+        )
+        raise
+
+    duration_ms = (time.perf_counter() - start) * 1000
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    logger.info(
+        "Request req_id=%s method=%s path=%s status=%s duration_ms=%.2f",
+        request_id,
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+    )
+    return response
+
+
 # ============================================
 # ROUTES PRINCIPALES
 # ============================================
@@ -118,11 +179,50 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Health check"""
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat()
+    """
+    Health check con validación de dependencias.
+    Devuelve 503 si algún servicio crítico no está disponible.
+    """
+    checks = {"database": "ok", "redis": "ok"}
+
+    try:
+        _check_database()
+    except Exception as exc:
+        checks["database"] = f"error: {exc}"
+
+    try:
+        _check_redis()
+    except Exception as exc:
+        checks["redis"] = f"error: {exc}"
+
+    status = "healthy" if all(value == "ok" for value in checks.values()) else "unhealthy"
+    payload = {
+        "status": status,
+        "timestamp": datetime.utcnow().isoformat(),
+        "services": checks,
+        "environment": settings.ENVIRONMENT,
     }
+
+    if status == "healthy":
+        return payload
+
+    return JSONResponse(status_code=503, content=payload)
+
+
+@app.get("/health/live")
+async def liveness_check():
+    """
+    Liveness probe: verifica que el proceso responde.
+    """
+    return {"status": "alive", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/health/ready")
+async def readiness_check():
+    """
+    Readiness probe: alias de /health para integraciones de orquestación.
+    """
+    return await health_check()
 
 
 @app.get("/api/v1/info")

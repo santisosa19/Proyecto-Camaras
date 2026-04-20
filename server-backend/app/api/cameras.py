@@ -9,6 +9,7 @@ from datetime import datetime
 
 from app.database.connection import get_db
 from app.models.database import CameraStatus
+from app.security import require_admin_api_key
 
 router = APIRouter()
 
@@ -62,7 +63,11 @@ async def get_camera(camera_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/", response_model=CameraInfo)
-async def create_camera(camera: CameraCreate, db: Session = Depends(get_db)):
+async def create_camera(
+    camera: CameraCreate,
+    _auth: None = Depends(require_admin_api_key),
+    db: Session = Depends(get_db)
+):
     """
     Registrar una nueva cámara
     """
@@ -94,7 +99,11 @@ async def create_camera(camera: CameraCreate, db: Session = Depends(get_db)):
 
 
 @router.delete("/{camera_id}")
-async def delete_camera(camera_id: str, db: Session = Depends(get_db)):
+async def delete_camera(
+    camera_id: str,
+    _auth: None = Depends(require_admin_api_key),
+    db: Session = Depends(get_db)
+):
     """
     Eliminar una cámara
     """
@@ -112,7 +121,11 @@ async def delete_camera(camera_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{camera_id}/activate")
-async def activate_camera(camera_id: str, db: Session = Depends(get_db)):
+async def activate_camera(
+    camera_id: str,
+    _auth: None = Depends(require_admin_api_key),
+    db: Session = Depends(get_db)
+):
     """
     Activar una cámara
     """
@@ -130,7 +143,11 @@ async def activate_camera(camera_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{camera_id}/deactivate")
-async def deactivate_camera(camera_id: str, db: Session = Depends(get_db)):
+async def deactivate_camera(
+    camera_id: str,
+    _auth: None = Depends(require_admin_api_key),
+    db: Session = Depends(get_db)
+):
     """
     Desactivar una cámara
     """

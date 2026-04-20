@@ -22,6 +22,7 @@ import os
 from collections import deque
 from pathlib import Path
 from datetime import datetime
+from urllib.parse import urlsplit, urlunsplit
 import httpx
 from dotenv import load_dotenv
 
@@ -41,6 +42,25 @@ from app.services.counter import PersonCounter
 
 # Archivo de configuración de líneas
 LINES_CONFIG_FILE = Path(__file__).parent / "lines_config.json"
+
+
+def sanitize_rtsp_url(url: str) -> str:
+    """
+    Oculta credenciales en logs de URLs RTSP/HTTP.
+    """
+    if not url:
+        return ""
+    parts = urlsplit(url)
+    if parts.username is None:
+        return url
+    auth = "***"
+    if parts.password is not None:
+        auth = "***:***"
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    netloc = f"{auth}@{host}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 class LineConfigurator:
@@ -231,17 +251,21 @@ class RemoteIngestClient:
         api_key: str = "",
         timeout_seconds: float = 5.0,
         max_batch_size: int = 200,
+        max_queue_size: int = 10000,
         crossing_flush_interval: float = 1.0,
         detection_flush_interval: float = 5.0,
     ):
         self.base_url = base_url.rstrip("/")
         self.max_batch_size = max_batch_size
+        self.max_queue_size = max(1, max_queue_size)
         self.crossing_flush_interval = crossing_flush_interval
         self.detection_flush_interval = detection_flush_interval
         self.pending_crossings: deque = deque()
         self.pending_detections: deque = deque()
         self.last_crossing_flush = 0.0
         self.last_detection_flush = 0.0
+        self.dropped_crossings = 0
+        self.dropped_detections = 0
 
         headers = {"Content-Type": "application/json"}
         if api_key:
@@ -254,9 +278,25 @@ class RemoteIngestClient:
 
     def enqueue_crossings(self, events: list[dict]):
         for event in events:
+            if len(self.pending_crossings) >= self.max_queue_size:
+                self.pending_crossings.popleft()
+                self.dropped_crossings += 1
+                if self.dropped_crossings % 100 == 1:
+                    logger.warning(
+                        "Cola de crossings llena; se descartaron %s eventos",
+                        self.dropped_crossings,
+                    )
             self.pending_crossings.append(event)
 
     def enqueue_detection(self, item: dict):
+        if len(self.pending_detections) >= self.max_queue_size:
+            self.pending_detections.popleft()
+            self.dropped_detections += 1
+            if self.dropped_detections % 100 == 1:
+                logger.warning(
+                    "Cola de detecciones llena; se descartaron %s snapshots",
+                    self.dropped_detections,
+                )
         self.pending_detections.append(item)
 
     def _post_batch(self, path: str, key: str, batch: list[dict]) -> bool:
@@ -274,18 +314,23 @@ class RemoteIngestClient:
             logger.error(f"Error de red enviando lote a {path}: {exc}")
             return False
 
-    def _flush_queue(self, queue: deque, path: str, key: str):
+    def _flush_queue(self, queue: deque, path: str, key: str, flush_all: bool = False):
         if not queue:
             return
 
-        batch = []
-        while queue and len(batch) < self.max_batch_size:
-            batch.append(queue.popleft())
+        while queue:
+            batch = []
+            while queue and len(batch) < self.max_batch_size:
+                batch.append(queue.popleft())
 
-        if not self._post_batch(path=path, key=key, batch=batch):
-            # Reinsertar al frente respetando orden original.
-            for item in reversed(batch):
-                queue.appendleft(item)
+            if not self._post_batch(path=path, key=key, batch=batch):
+                # Reinsertar al frente respetando orden original.
+                for item in reversed(batch):
+                    queue.appendleft(item)
+                break
+
+            if not flush_all:
+                break
 
     def flush(self, force: bool = False):
         now = time.time()
@@ -296,7 +341,8 @@ class RemoteIngestClient:
             self._flush_queue(
                 queue=self.pending_crossings,
                 path="/api/v1/ingest/crossings",
-                key="events"
+                key="events",
+                flush_all=force
             )
             self.last_crossing_flush = now
 
@@ -304,7 +350,8 @@ class RemoteIngestClient:
             self._flush_queue(
                 queue=self.pending_detections,
                 path="/api/v1/ingest/detections",
-                key="items"
+                key="items",
+                flush_all=force
             )
             self.last_detection_flush = now
 
@@ -326,6 +373,7 @@ class TrafficAnalysisSystem:
         save_to_api: bool = False,
         remote_api_base_url: str = "",
         remote_api_key: str = "",
+        max_ingest_queue_size: int = 10000,
         branch_id: str = "",
         branch_name: str = "",
     ):
@@ -352,6 +400,7 @@ class TrafficAnalysisSystem:
         self.save_to_api = save_to_api
         self.remote_api_base_url = remote_api_base_url.strip()
         self.remote_api_key = remote_api_key.strip()
+        self.max_ingest_queue_size = max(1, int(max_ingest_queue_size))
         self.branch_id = branch_id.strip()
         self.branch_name = branch_name.strip()
         self.remote_ingest: RemoteIngestClient | None = None
@@ -383,7 +432,8 @@ class TrafficAnalysisSystem:
                 self.remote_ingest = RemoteIngestClient(
                     base_url=self.remote_api_base_url,
                     api_key=self.remote_api_key,
-                    timeout_seconds=5.0
+                    timeout_seconds=5.0,
+                    max_queue_size=self.max_ingest_queue_size,
                 )
                 logger.info(f"✓ Ingesta remota habilitada: {self.remote_api_base_url}")
 
@@ -764,22 +814,26 @@ def main():
     CAMERA_CONFIG = {
         'camera_id': 'camara_prueba_marathon',
         'camera_name': 'Cámara de Prueba Marathon',
-        'rtsp_url': os.getenv('CAMERA_RTSP_URL', 'rtsp://admin:Marathon@192.168.0.100:554/Streaming/Channels/101'),
+        'rtsp_url': os.getenv('CAMERA_RTSP_URL', '').strip(),
         'entry_direction': 'positive',  # positive = entra, negative = sale
-        'show_window': True,      # True = mostrar ventana con video
+        'show_window': os.getenv('SHOW_WINDOW', 'false').lower() == 'true',
         'save_to_db': os.getenv('SAVE_TO_DB', 'false').lower() == 'true',
-        'save_to_api': os.getenv('SAVE_TO_API', 'true').lower() == 'true',
+        'save_to_api': os.getenv('SAVE_TO_API', 'false').lower() == 'true',
         'remote_api_base_url': os.getenv('REMOTE_API_BASE_URL', ''),
         'remote_api_key': os.getenv('REMOTE_API_KEY', ''),
+        'max_ingest_queue_size': int(os.getenv('MAX_INGEST_QUEUE_SIZE', '10000')),
         'branch_id': os.getenv('BRANCH_ID', ''),
         'branch_name': os.getenv('BRANCH_NAME', ''),
     }
+
+    if not CAMERA_CONFIG['rtsp_url']:
+        raise ValueError("CAMERA_RTSP_URL es obligatorio")
     
     logger.info("=" * 60)
     logger.info("TRAFFIC ANALYSIS SYSTEM - Marathon SRL")
     logger.info("=" * 60)
     logger.info(f"Cámara: {CAMERA_CONFIG['camera_name']}")
-    logger.info(f"URL: {CAMERA_CONFIG['rtsp_url']}")
+    logger.info(f"URL: {sanitize_rtsp_url(CAMERA_CONFIG['rtsp_url'])}")
     logger.info("=" * 60)
     
     # Crear y ejecutar sistema

@@ -1,16 +1,19 @@
+import os
+
 import cv2
 
-usuario = "admin"
-clave = "abcd1234"
-ip = "181.90.13.25"
 
-urls = [
-    "rtsp://admin:abcd1234@181.90.13.25:8554/Streaming/Channels/101"
-]
+def main() -> None:
+    rtsp_url = os.getenv("CAMERA_RTSP_URL", "").strip()
+    if not rtsp_url:
+        raise ValueError("Definí CAMERA_RTSP_URL para probar conectividad RTSP")
 
-for url in urls:
-    print("Probando:", url.replace(clave, "****"))
-    cap = cv2.VideoCapture(url)
-    ok, frame = cap.read()
+    print("Probando conexión RTSP...")
+    cap = cv2.VideoCapture(rtsp_url)
+    ok, _ = cap.read()
     print("abrió:", cap.isOpened(), "frame:", ok)
     cap.release()
+
+
+if __name__ == "__main__":
+    main()

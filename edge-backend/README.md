@@ -1,31 +1,30 @@
 # Edge Backend (Sucursal)
 
-Este backend corre en cada sucursal. Procesa RTSP localmente y envía eventos al servidor central.
+Este agente corre en cada sucursal. Procesa RTSP localmente y envía eventos al servidor central.
 
 ## Ejecutar local
 
-1. Copiar variables:
+1. Preparar entorno:
 
 ```bash
 cp .env.example .env
 ```
 
-2. Definir variables necesarias en terminal:
+2. Completar variables mínimas en `.env`:
 
 ```bash
-export CAMERA_RTSP_URL='rtsp://user:pass@ip_dvr:554/Streaming/Channels/101'
-export SAVE_TO_DB=false
-export SAVE_TO_API=true
-export REMOTE_API_BASE_URL='http://ip-servidor-central:8000'
-export REMOTE_API_KEY='tu_api_key'
+CAMERA_RTSP_URL=rtsp://user:pass@ip_dvr:554/Streaming/Channels/101
+SAVE_TO_API=true
+REMOTE_API_BASE_URL=http://ip-servidor-central:8000
+REMOTE_API_KEY=tu_ingest_api_key
 ```
 
-3. Iniciar agente:
+3. Levantar:
 
 ```bash
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 python run_camera.py
 ```
 
@@ -38,11 +37,9 @@ docker run --env-file .env traffic-edge-backend
 
 ## Excluir empleados del conteo
 
-El sistema puede clasificar cada track como `employee` o `non_employee` y excluir empleados del conteo de cruces.
+El sistema puede clasificar tracks como `employee` o `non_employee` y excluir empleados del conteo.
 
 ### 1) Dataset para entrenamiento
-
-Estructura esperada:
 
 ```bash
 dataset/
@@ -66,13 +63,9 @@ python scripts/train_employee_classifier.py \
 
 ### 3) Activar en runtime
 
-Variables de entorno:
-
 ```bash
-export EMPLOYEE_MODEL_PATH='./models/employee_classifier.pt'
-export EMPLOYEE_THRESHOLD='0.75'
-export EMPLOYEE_VOTE_WINDOW='8'
-export EMPLOYEE_MIN_VOTES='5'
+EMPLOYEE_MODEL_PATH=./models/employee_classifier.pt
+EMPLOYEE_THRESHOLD=0.75
+EMPLOYEE_VOTE_WINDOW=8
+EMPLOYEE_MIN_VOTES=5
 ```
-
-Con estas variables, los tracks clasificados como empleados no se contabilizan en entradas/salidas.

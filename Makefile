@@ -1,82 +1,69 @@
-.PHONY: help install run test clean docker-build docker-up docker-down db-init db-migrate
+.PHONY: help install-server install-edge install-frontend run-server run-edge \
+\tdocker-config docker-build docker-up docker-up-workers docker-up-edge \
+\tdocker-down docker-logs health check-server clean
 
 help:
-	@echo "Traffic Analysis System - Comandos disponibles:"
+	@echo "Traffic Analysis System - comandos disponibles:"
 	@echo ""
-	@echo "  make install       - Instalar dependencias"
-	@echo "  make run           - Ejecutar servidor de desarrollo"
-	@echo "  make test          - Ejecutar tests"
-	@echo "  make test-system   - Ejecutar test completo del sistema"
-	@echo "  make clean         - Limpiar archivos temporales"
-	@echo "  make docker-build  - Construir imágenes Docker"
-	@echo "  make docker-up     - Iniciar servicios Docker"
-	@echo "  make docker-down   - Detener servicios Docker"
-	@echo "  make db-init       - Inicializar base de datos"
-	@echo "  make logs          - Ver logs de Docker"
+	@echo "  make install-server    - Instalar dependencias de server-backend"
+	@echo "  make install-edge      - Instalar dependencias de edge-backend"
+	@echo "  make install-frontend  - Instalar dependencias de frontend"
+	@echo "  make run-server        - Ejecutar API central en local"
+	@echo "  make run-edge          - Ejecutar agente de cámara en local"
+	@echo "  make docker-config     - Validar docker compose"
+	@echo "  make docker-build      - Construir imágenes"
+	@echo "  make docker-up         - Levantar postgres + redis + server-backend"
+	@echo "  make docker-up-workers - Levantar worker/beat/flower (perfil workers)"
+	@echo "  make docker-up-edge    - Levantar edge-backend (perfil edge)"
+	@echo "  make docker-down       - Detener stack"
+	@echo "  make docker-logs       - Ver logs"
+	@echo "  make health            - Consultar health de la API"
+	@echo "  make check-server      - Validación sintáctica del backend central"
 	@echo ""
 
-install:
-	cd backend && pip install -r requirements.txt
+install-server:
+	cd server-backend && python3 -m pip install -r requirements.txt
 
-run:
-	cd backend && python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+install-edge:
+	cd edge-backend && python3 -m pip install -r requirements.txt
 
-test:
-	cd backend && pytest tests/ -v
+install-frontend:
+	cd frontend && npm install
 
-test-system:
-	cd backend && python test_system.py
+run-server:
+	cd server-backend && uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+run-edge:
+	cd edge-backend && python run_camera.py
+
+docker-config:
+	docker compose config
+
+docker-build:
+	docker compose build
+
+docker-up:
+	docker compose up -d postgres redis server-backend
+
+docker-up-workers:
+	docker compose --profile workers up -d celery-worker celery-beat flower
+
+docker-up-edge:
+	docker compose --profile edge up -d edge-backend
+
+docker-down:
+	docker compose down
+
+docker-logs:
+	docker compose logs -f --tail=200
+
+health:
+	curl -fsS http://localhost:8000/health | python3 -m json.tool
+
+check-server:
+	python3 -m compileall server-backend/app
 
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete
-	find . -type f -name "*.pyo" -delete
-	find . -type d -name "*.egg-info" -exec rm -rf {} + 2>/dev/null || true
 	find . -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true
-
-docker-build:
-	docker-compose build
-
-docker-up:
-	docker-compose up -d
-	@echo "Servicios iniciados:"
-	@echo "  - API:      http://localhost:8000"
-	@echo "  - Docs:     http://localhost:8000/docs"
-	@echo "  - Frontend: http://localhost:3000"
-	@echo "  - Flower:   http://localhost:5555"
-
-docker-down:
-	docker-compose down
-
-docker-logs:
-	docker-compose logs -f
-
-db-init:
-	cd backend && python -c "from app.database.connection import init_db; init_db(); print('✓ Base de datos inicializada')"
-
-db-shell:
-	docker-compose exec postgres psql -U traffic_user -d traffic_db
-
-format:
-	cd backend && black app/
-	cd backend && isort app/
-
-lint:
-	cd backend && flake8 app/
-	cd backend && mypy app/
-
-dev-setup:
-	@echo "Configurando entorno de desarrollo..."
-	cp .env.example .env
-	@echo "✓ Archivo .env creado"
-	@echo "  Edita .env con tus configuraciones"
-	make install
-	@echo "✓ Dependencias instaladas"
-	make docker-up
-	@echo "✓ Servicios Docker iniciados"
-	sleep 5
-	make db-init
-	@echo "✓ Base de datos inicializada"
-	@echo ""
-	@echo "🎉 ¡Entorno listo!"
-	@echo "   Accede a http://localhost:8000/docs para ver la API"

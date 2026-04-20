@@ -1,10 +1,11 @@
 """
 API Router - Procesamiento
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from typing import Dict, Optional
+from typing import Dict
 
+from app.security import require_admin_api_key
 router = APIRouter()
 
 
@@ -49,7 +50,10 @@ async def get_processor_status(camera_id: str):
 
 
 @router.post("/start/{camera_id}")
-async def start_processor(camera_id: str):
+async def start_processor(
+    camera_id: str,
+    _auth: None = Depends(require_admin_api_key)
+):
     """
     Iniciar procesador de una cámara
     
@@ -76,7 +80,10 @@ async def start_processor(camera_id: str):
 
 
 @router.post("/stop/{camera_id}")
-async def stop_processor(camera_id: str):
+async def stop_processor(
+    camera_id: str,
+    _auth: None = Depends(require_admin_api_key)
+):
     """
     Detener procesador de una cámara
     """
@@ -97,7 +104,10 @@ async def stop_processor(camera_id: str):
 
 
 @router.post("/restart/{camera_id}")
-async def restart_processor(camera_id: str):
+async def restart_processor(
+    camera_id: str,
+    _auth: None = Depends(require_admin_api_key)
+):
     """
     Reiniciar procesador de una cámara
     """

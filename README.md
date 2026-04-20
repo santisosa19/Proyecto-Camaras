@@ -1,150 +1,99 @@
-# Sistema de Análisis de Tráfico y Comportamiento de Clientes
-## Marathon SRL - Traffic Analysis System
+# Traffic Analysis System
 
-Sistema de visión computacional para análisis de tráfico de clientes en locales de retail.
+Sistema distribuido para conteo de personas en sucursales (edge) y consolidación de métricas en servidor central.
 
-### 🎯 Características
+## Arquitectura
 
-- **Detección de personas en tiempo real** con YOLOv8
-- **Conteo automático** de entradas y salidas
-- **Integración con CRM Cegid** para cálculo de conversión
-- **Heatmaps** de zonas más transitadas
-- **Dashboard web** en tiempo real
-- **API REST** para integraciones
+- `edge-backend/`: agente en sucursal que consume RTSP, detecta personas y envía eventos/snapshots al central.
+- `server-backend/`: API FastAPI central para ingestión, métricas y dashboard.
+- `frontend/`: dashboard React (Vite).
 
-### 📁 Estructura del Proyecto
+## Requisitos
 
-```
-traffic-analysis-system/
-├── backend/                 # API y servicios de procesamiento
-│   ├── app/
-│   │   ├── main.py         # FastAPI application
-│   │   ├── api/            # Endpoints REST
-│   │   ├── models/         # Modelos de datos
-│   │   ├── services/       # Lógica de negocio
-│   │   │   ├── video_capture.py
-│   │   │   ├── detector.py
-│   │   │   ├── counter.py
-│   │   │   └── heatmap.py
-│   │   └── database/       # Acceso a datos
-│   ├── requirements.txt
-│   ├── Dockerfile
-│   └── tests/
-├── frontend/               # Dashboard React
-│   ├── src/
-│   ├── public/
-│   ├── package.json
-│   └── Dockerfile
-├── docker-compose.yml
-├── .env.example
-└── README.md
-```
+- Docker + Docker Compose v2
+- Python 3.11 (recomendado para `edge-backend`)
+- Node.js 18+ (si corrés frontend local)
 
-### 🚀 Quick Start
+## Configuración
 
-#### 1. Clonar y configurar
+1. Copiar configuración base:
+
 ```bash
-git clone [repo-url]
-cd traffic-analysis-system
 cp .env.example .env
-# Editar .env con tus configuraciones
 ```
 
-#### 2. Iniciar con Docker
+2. Ajustar como mínimo en `.env`:
+
+- `JWT_SECRET_KEY`
+- `INGEST_API_KEY`
+- `ADMIN_API_KEY`
+- `CAMERA_RTSP_URL` (si vas a levantar edge)
+
+## Ejecución con Docker
+
+### Stack central (recomendado)
+
 ```bash
-docker-compose up -d
+docker compose up -d postgres redis server-backend
 ```
 
-#### 3. Acceder
-- API: http://localhost:8000
-- Docs: http://localhost:8000/docs
-- Dashboard: http://localhost:3000
+Servicios:
 
-### 📋 Requisitos
+- API: `http://localhost:8000`
+- Swagger: `http://localhost:8000/docs`
+- Health: `http://localhost:8000/health`
 
-#### Hardware
-- CPU: 4+ cores
-- RAM: 8GB mínimo
-- Storage: 100GB
-- GPU: Opcional (mejora 3-5x el rendimiento)
+### Workers (opcional)
 
-#### Software
-- Python 3.10+
-- Docker & Docker Compose
-- PostgreSQL 14+
-- Redis 7+
-- Node.js 18+
-
-### 🔧 Configuración
-
-#### Variables de Entorno
 ```bash
-# Base de datos
-DATABASE_URL=postgresql://user:pass@localhost:5432/traffic_db
-
-# Redis
-REDIS_URL=redis://localhost:6379/0
-
-# Cámaras RTSP
-CAMERA_1_URL=rtsp://admin:pass@192.168.1.100:554/Streaming/Channels/102
-
-# Cegid
-CEGID_DB_URL=postgresql://readonly:pass@cegid-server:5432/cegid
-
-# JWT
-JWT_SECRET=your-secret-key-here
+docker compose --profile workers up -d celery-worker celery-beat flower
 ```
 
-### 📊 Stack Tecnológico
+### Edge agent (opcional)
 
-**Backend:**
-- Python 3.10+
-- FastAPI (API REST)
-- YOLOv8 (Detección)
-- OpenCV (Procesamiento de video)
-- PostgreSQL (Base de datos)
-- Redis + Celery (Colas y tareas async)
-
-**Frontend:**
-- React 18
-- Next.js 14
-- TailwindCSS
-- Recharts (Visualización)
-
-**DevOps:**
-- Docker & Docker Compose
-- Nginx (Reverse proxy)
-
-
-### 👨‍💻 Desarrollo
-
-#### Instalar dependencias backend
 ```bash
-cd backend
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+docker compose --profile edge up -d edge-backend
 ```
 
-#### Ejecutar tests
+## Ejecución local (sin Docker)
+
+### Server central
+
 ```bash
-pytest tests/
+cd server-backend
+cp .env.example .env
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-#### Desarrollo frontend
+### Edge agent
+
 ```bash
-cd frontend
-npm install
-npm run dev
+cd edge-backend
+cp .env.example .env
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python run_camera.py
 ```
 
-### 📝 Documentación
+## Seguridad operativa incorporada
 
-- [Propuesta Ejecutiva](docs/01_Propuesta_Ejecutiva.docx)
-- [Plan de Proyecto](docs/02_Plan_Proyecto.docx)
-- [Arquitectura Técnica](docs/03_Arquitectura_Tecnica.docx)
-- [Manual de Implementación](docs/04_Manual_Implementacion.docx)
+- Validación estricta de configuración en producción (`ENVIRONMENT=production`).
+- `INGEST_API_KEY` obligatoria en producción para `/api/v1/ingest/*`.
+- `ADMIN_API_KEY` para endpoints administrativos de cámaras/procesamiento.
+- Health checks reales de DB y Redis (`/health`, `/health/ready`).
+- Middleware de request-id y headers de seguridad básicos.
 
-### 🤝 Contribución
+## Comandos útiles
 
-Desarrollado por **Santiago Sosa**.
+```bash
+make help
+make docker-config
+make docker-up
+make docker-up-workers
+make docker-up-edge
+make health
+```

@@ -1,22 +1,19 @@
-version: '3.8'
-
 services:
-  # PostgreSQL Database
   postgres:
     image: postgres:14-alpine
     container_name: traffic_postgres
     environment:
-      POSTGRES_USER: traffic_user
-      POSTGRES_PASSWORD: secure_password_123
-      POSTGRES_DB: traffic_db
-      POSTGRES_INITDB_ARGS: "-E UTF8"
+      POSTGRES_USER: ${POSTGRES_USER:-traffic_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-traffic_password}
+      POSTGRES_DB: ${POSTGRES_DB:-traffic_db}
+      POSTGRES_INITDB_ARGS: -E UTF8
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./backend/database/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./server-backend/database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U traffic_user"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-traffic_user} -d ${POSTGRES_DB:-traffic_db}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -24,13 +21,12 @@ services:
     networks:
       - traffic_network
 
-  # Redis
   redis:
     image: redis:7-alpine
     container_name: traffic_redis
     command: redis-server --appendonly yes
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -42,139 +38,152 @@ services:
     networks:
       - traffic_network
 
-  # Backend API
-  backend:
+  server-backend:
     build:
-      context: ./backend
+      context: ./server-backend
       dockerfile: Dockerfile
-    container_name: traffic_backend
-    env_file:
-      - .env
+    container_name: traffic_server_backend
     environment:
-      - DATABASE_URL=postgresql://traffic_user:secure_password_123@postgres:5432/traffic_db
-      - REDIS_URL=redis://redis:6379/0
+      ENVIRONMENT: ${APP_ENVIRONMENT:-development}
+      DEBUG: ${APP_DEBUG:-false}
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      DATABASE_URL: ${DATABASE_URL:-postgresql://traffic_user:traffic_password@postgres:5432/traffic_db}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-secret}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:3000}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      INGEST_API_KEY: ${INGEST_API_KEY:-}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
     ports:
-      - "8000:8000"
-    volumes:
-      - ./backend:/app
-      - /tmp/.X11-unix:/tmp/.X11-unix:rw  # For display if needed
+      - "${API_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)\"",
+        ]
+      interval: 20s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
     networks:
       - traffic_network
-    # GPU support (descomentar si tienes GPU NVIDIA)
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
 
-  # Celery Worker
-  celery_worker:
+  celery-worker:
     build:
-      context: ./backend
+      context: ./server-backend
       dockerfile: Dockerfile
-    container_name: traffic_celery
-    command: celery -A app.celery_app worker --loglevel=info
-    env_file:
-      - .env
+    container_name: traffic_celery_worker
+    command: celery -A app.celery_app:celery worker --loglevel=info
     environment:
-      - DATABASE_URL=postgresql://traffic_user:secure_password_123@postgres:5432/traffic_db
-      - REDIS_URL=redis://redis:6379/0
-    volumes:
-      - ./backend:/app
+      ENVIRONMENT: ${APP_ENVIRONMENT:-development}
+      DEBUG: ${APP_DEBUG:-false}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://traffic_user:traffic_password@postgres:5432/traffic_db}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-secret}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:3000}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      INGEST_API_KEY: ${INGEST_API_KEY:-}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
     depends_on:
-      - redis
-      - postgres}
-      - backend
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      server-backend:
+        condition: service_started
     restart: unless-stopped
     networks:
       - traffic_network
+    profiles:
+      - workers
 
-  # Celery Beat (Scheduled Tasks)
-  celery_beat:
+  celery-beat:
     build:
-      context: ./backend
+      context: ./server-backend
       dockerfile: Dockerfile
     container_name: traffic_celery_beat
-    command: celery -A app.celery_app beat --loglevel=info
-    env_file:
-      - .env
+    command: celery -A app.celery_app:celery beat --loglevel=info
     environment:
-      - DATABASE_URL=postgresql://traffic_user:secure_password_123@postgres:5432/traffic_db
-      - REDIS_URL=redis://redis:6379/0
-    volumes:
-      - ./backend:/app
+      ENVIRONMENT: ${APP_ENVIRONMENT:-development}
+      DEBUG: ${APP_DEBUG:-false}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://traffic_user:traffic_password@postgres:5432/traffic_db}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-secret}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:3000}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      INGEST_API_KEY: ${INGEST_API_KEY:-}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
     depends_on:
-      - redis
-      - postgres
-      - backend
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      server-backend:
+        condition: service_started
     restart: unless-stopped
     networks:
       - traffic_network
+    profiles:
+      - workers
 
-  # Flower (Celery Monitoring)
   flower:
     build:
-      context: ./backend
+      context: ./server-backend
       dockerfile: Dockerfile
     container_name: traffic_flower
-    command: celery -A app.celery_app flower --port=5555
-    env_file:
-      - .env
+    command: celery -A app.celery_app:celery flower --port=5555
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
     ports:
-      - "5555:5555"
+      - "${FLOWER_PORT:-5555}:5555"
     depends_on:
-      - redis
-      - celery_worker
+      redis:
+        condition: service_healthy
+      celery-worker:
+        condition: service_started
     restart: unless-stopped
     networks:
       - traffic_network
+    profiles:
+      - workers
 
-  # Frontend Dashboard
-  #frontend:
-  #  build:
-  #    context: ./frontend
-  #    dockerfile: Dockerfile
-  #  container_name: traffic_frontend
-  #  environment:
-  #    - NEXT_PUBLIC_API_URL=http://localhost:8000
-  #  ports:
-  #    - "3000:3000"
-  #  volumes:
-  #    - ./frontend:/app
-  #    - /app/node_modules
-  #    - /app/.next
-  #  depends_on:
-  #    - backend
-  #  restart: unless-stopped
-  #  networks:
-  #    - traffic_network
-
-  # Nginx Reverse Proxy (Opcional para producción)
-  # nginx:
-  #   image: nginx:alpine
-  #   container_name: traffic_nginx
-  #   ports:
-  #     - "80:80"
-  #     - "443:443"
-  #   volumes:
-  #     - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-  #     - ./nginx/ssl:/etc/nginx/ssl:ro
-  #   depends_on:
-  #     - frontend
-  #     - backend
-  #   restart: unless-stopped
-  #   networks:
-  #     - traffic_network
+  edge-backend:
+    build:
+      context: ./edge-backend
+      dockerfile: Dockerfile
+    container_name: traffic_edge_backend
+    environment:
+      CAMERA_RTSP_URL: ${CAMERA_RTSP_URL:-}
+      SAVE_TO_DB: ${SAVE_TO_DB:-false}
+      SAVE_TO_API: ${SAVE_TO_API:-true}
+      REMOTE_API_BASE_URL: ${REMOTE_API_BASE_URL:-http://server-backend:8000}
+      REMOTE_API_KEY: ${REMOTE_API_KEY:-}
+      BRANCH_ID: ${BRANCH_ID:-default_branch}
+      BRANCH_NAME: ${BRANCH_NAME:-Default Branch}
+      SHOW_WINDOW: ${SHOW_WINDOW:-false}
+      MAX_INGEST_QUEUE_SIZE: ${MAX_INGEST_QUEUE_SIZE:-10000}
+    depends_on:
+      server-backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - traffic_network
+    profiles:
+      - edge
 
 volumes:
   postgres_data:
