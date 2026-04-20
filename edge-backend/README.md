@@ -35,3 +35,44 @@ python run_camera.py
 docker build -t traffic-edge-backend .
 docker run --env-file .env traffic-edge-backend
 ```
+
+## Excluir empleados del conteo
+
+El sistema puede clasificar cada track como `employee` o `non_employee` y excluir empleados del conteo de cruces.
+
+### 1) Dataset para entrenamiento
+
+Estructura esperada:
+
+```bash
+dataset/
+  train/
+    employee/
+    non_employee/
+  val/
+    employee/
+    non_employee/
+```
+
+### 2) Entrenar modelo
+
+```bash
+python scripts/train_employee_classifier.py \
+  --dataset-dir ./dataset \
+  --output ./models/employee_classifier.pt \
+  --epochs 8 \
+  --batch-size 32
+```
+
+### 3) Activar en runtime
+
+Variables de entorno:
+
+```bash
+export EMPLOYEE_MODEL_PATH='./models/employee_classifier.pt'
+export EMPLOYEE_THRESHOLD='0.75'
+export EMPLOYEE_VOTE_WINDOW='8'
+export EMPLOYEE_MIN_VOTES='5'
+```
+
+Con estas variables, los tracks clasificados como empleados no se contabilizan en entradas/salidas.
