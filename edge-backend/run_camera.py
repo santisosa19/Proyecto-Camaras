@@ -40,6 +40,7 @@ from app.services.video_capture import VideoCapture
 from app.services.detector import PersonDetector
 from app.services.counter import PersonCounter
 from app.services.heatmap import OccupancyHeatmap
+from app.services.apparent_gender import ApparentGenderEstimator
 
 
 # Archivo de configuración de líneas
@@ -435,6 +436,8 @@ class TrafficAnalysisSystem:
         self.heatmap: OccupancyHeatmap | None = None
         self.hourly_heatmap: OccupancyHeatmap | None = None
         self.current_heatmap_hour_start: datetime | None = None
+        self.gender_estimator: ApparentGenderEstimator | None = None
+        self.latest_track_gender: dict[int, dict] = {}
 
         # Configuración de mapa de calor
         self.heatmap_enabled = os.getenv("HEATMAP_ENABLED", "true").lower() == "true"
@@ -447,6 +450,11 @@ class TrafficAnalysisSystem:
         self.heatmap_snapshot_interval_seconds = max(5.0, self.heatmap_snapshot_interval_seconds)
         self.last_heatmap_snapshot = 0.0
         self.send_hourly_heatmap_to_api = os.getenv("SEND_HOURLY_HEATMAP_TO_API", "true").lower() == "true"
+        self.hourly_heatmap_partial_flush_seconds = max(
+            15.0,
+            float(os.getenv("HOURLY_HEATMAP_PARTIAL_FLUSH_SECONDS", "60")),
+        )
+        self.last_hourly_heatmap_partial_flush = 0.0
 
         self.heatmap_background_max_width = max(160, int(os.getenv("HEATMAP_BACKGROUND_MAX_WIDTH", "960")))
         self.heatmap_background_jpeg_quality = int(os.getenv("HEATMAP_BACKGROUND_JPEG_QUALITY", "68"))
@@ -505,7 +513,7 @@ class TrafficAnalysisSystem:
             
             # 2. Detector YOLO
             logger.info("Cargando detector YOLOv8...")
-            yolo_model_path = os.getenv("YOLO_MODEL_PATH", "yolov8s.pt").strip() or "yolov8s.pt"
+            yolo_model_path = os.getenv("YOLO_MODEL_PATH", "yolov8n.pt").strip() or "yolov8n.pt"
             yolo_confidence = float(os.getenv("YOLO_CONFIDENCE", "0.22"))
             yolo_iou = float(os.getenv("YOLO_IOU", "0.60"))
             yolo_image_size = int(os.getenv("YOLO_IMAGE_SIZE", "1280"))
@@ -569,6 +577,34 @@ class TrafficAnalysisSystem:
             
             logger.info("✓ Contador configurado")
 
+            apparent_gender_enabled = os.getenv("APPARENT_GENDER_ENABLED", "false").lower() == "true"
+            gender_model_dir = os.getenv("GENDER_MODEL_DIR", "models/gender").strip() or "models/gender"
+            if not os.path.isabs(gender_model_dir):
+                gender_model_dir = str(Path(__file__).parent / gender_model_dir)
+            gender_model_prototxt = os.getenv("GENDER_MODEL_PROTOTXT", "").strip()
+            gender_model_weights = os.getenv("GENDER_MODEL_WEIGHTS", "").strip()
+            if gender_model_prototxt and not os.path.isabs(gender_model_prototxt):
+                gender_model_prototxt = str(Path(__file__).parent / gender_model_prototxt)
+            if gender_model_weights and not os.path.isabs(gender_model_weights):
+                gender_model_weights = str(Path(__file__).parent / gender_model_weights)
+
+            self.gender_estimator = ApparentGenderEstimator(
+                enabled=apparent_gender_enabled,
+                model_prototxt_path=gender_model_prototxt,
+                model_weights_path=gender_model_weights,
+                model_dir=gender_model_dir,
+                auto_download=os.getenv("GENDER_AUTO_DOWNLOAD_MODEL", "true").lower() == "true",
+                sample_every_n_frames=int(os.getenv("GENDER_SAMPLE_EVERY_N_FRAMES", "10")),
+                vote_window=int(os.getenv("GENDER_VOTE_WINDOW", "12")),
+                min_votes=int(os.getenv("GENDER_MIN_VOTES", "4")),
+                confidence_threshold=float(os.getenv("GENDER_CONFIDENCE_THRESHOLD", "0.58")),
+                stale_track_seconds=float(os.getenv("GENDER_STALE_TRACK_SECONDS", "25")),
+            )
+            if self.gender_estimator.enabled:
+                logger.info("✓ Género aparente habilitado")
+            else:
+                logger.info("Género aparente deshabilitado")
+
             if self.heatmap_enabled:
                 heatmap_output_dir = (
                     os.getenv("HEATMAP_OUTPUT_DIR", "heatmaps").strip() or "heatmaps"
@@ -611,11 +647,12 @@ class TrafficAnalysisSystem:
                     minute=0, second=0, microsecond=0
                 )
                 logger.info(
-                    "✓ Heatmap habilitado (overlay=%s, snapshots=%s, intervalo=%.0fs, hourly_api=%s)",
+                    "✓ Heatmap habilitado (overlay=%s, snapshots=%s, intervalo=%.0fs, hourly_api=%s, partial_flush=%.0fs)",
                     self.show_heatmap_overlay,
                     self.save_heatmap_snapshots,
                     self.heatmap_snapshot_interval_seconds,
                     self.send_hourly_heatmap_to_api,
+                    self.hourly_heatmap_partial_flush_seconds,
                 )
             
             logger.info("=" * 60)
@@ -648,6 +685,14 @@ class TrafficAnalysisSystem:
                 detections = self.detector.detect(frame, track=True)
                 now_ts = time.time()
                 now_dt = datetime.utcnow()
+                if self.gender_estimator is not None and self.gender_estimator.enabled:
+                    track_gender_states = self.gender_estimator.classify_tracks(
+                        frame=frame,
+                        detections=detections,
+                        frame_index=frame_count,
+                        now_ts=now_ts,
+                    )
+                    self._apply_track_genders(detections, track_gender_states)
 
                 if self.hourly_heatmap is not None and self.current_heatmap_hour_start is not None:
                     frame_hour_start = now_dt.replace(minute=0, second=0, microsecond=0)
@@ -655,6 +700,7 @@ class TrafficAnalysisSystem:
                         self._flush_completed_hourly_heatmap(self.current_heatmap_hour_start)
                         self.hourly_heatmap.reset()
                         self.current_heatmap_hour_start = frame_hour_start
+                        self.last_hourly_heatmap_partial_flush = now_ts
 
                 if self.heatmap is not None:
                     self.heatmap.update(
@@ -668,6 +714,21 @@ class TrafficAnalysisSystem:
                         frame_shape=frame.shape,
                         timestamp=now_ts,
                     )
+                    if (
+                        self.current_heatmap_hour_start is not None
+                        and self.save_to_api
+                        and self.remote_ingest is not None
+                        and self.send_hourly_heatmap_to_api
+                        and (
+                            now_ts - self.last_hourly_heatmap_partial_flush
+                            >= self.hourly_heatmap_partial_flush_seconds
+                        )
+                    ):
+                        self._flush_completed_hourly_heatmap(
+                            self.current_heatmap_hour_start,
+                            is_partial=True,
+                        )
+                        self.last_hourly_heatmap_partial_flush = now_ts
                     if now_ts - self.last_heatmap_background_update >= self.heatmap_background_refresh_seconds:
                         self.latest_heatmap_background_base64 = self._encode_background_frame(frame)
                         self.last_heatmap_background_update = now_ts
@@ -694,7 +755,13 @@ class TrafficAnalysisSystem:
                         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                         
                         # Label con ID y confianza
-                        label = f"ID:{det.track_id} {det.confidence:.2f}"
+                        gender_short = "?"
+                        if det.apparent_gender == "male":
+                            gender_short = "M"
+                        elif det.apparent_gender == "female":
+                            gender_short = "F"
+                        track_label = det.track_id if det.track_id is not None else "-"
+                        label = f"ID:{track_label} G:{gender_short} {det.confidence:.2f}"
                         cv2.putText(
                             frame, label, (x1, y1 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2
@@ -880,7 +947,7 @@ class TrafficAnalysisSystem:
                             "direction": direction,
                             "event_type": event_type,
                             "track_id": event.get('track_id'),
-                            "event_metadata": {'position': event.get('position')},
+                            "event_metadata": self._build_crossing_event_metadata(event),
                             "timestamp": event_ts
                         }
                     )
@@ -906,7 +973,7 @@ class TrafficAnalysisSystem:
                     "direction": direction,
                     "event_type": event_type,
                     "track_id": event.get('track_id'),
-                    "event_metadata": {'position': event.get('position')},
+                    "event_metadata": self._build_crossing_event_metadata(event),
                     "timestamp": event.get('timestamp')
                 }
             )
@@ -937,6 +1004,39 @@ class TrafficAnalysisSystem:
             "error_count": capture_stats.get('error_count', 0),
         }
         self.remote_ingest.enqueue_detection(payload)
+
+    def _apply_track_genders(self, detections, track_gender_states):
+        """Aplicar estado de género aparente por track sobre detecciones del frame."""
+        for det in detections:
+            if det.track_id is None:
+                continue
+            track_id = int(det.track_id)
+            state = track_gender_states.get(track_id)
+            if state is None:
+                continue
+            det.apparent_gender = state.label
+            det.apparent_gender_confidence = state.confidence
+            self.latest_track_gender[track_id] = {
+                "label": state.label,
+                "confidence": float(state.confidence),
+                "votes": int(state.votes),
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+
+    def _build_crossing_event_metadata(self, event: dict) -> dict:
+        """Construir metadata enriquecida para un evento de cruce."""
+        metadata = {"position": event.get("position")}
+        track_id = event.get("track_id")
+        if track_id is None:
+            return metadata
+        track_gender = self.latest_track_gender.get(int(track_id))
+        if not track_gender:
+            metadata["apparent_gender"] = "unknown"
+            return metadata
+        metadata["apparent_gender"] = track_gender.get("label", "unknown")
+        metadata["apparent_gender_confidence"] = track_gender.get("confidence", 0.0)
+        metadata["apparent_gender_votes"] = track_gender.get("votes", 0)
+        return metadata
 
     def _save_heatmap_snapshot(self):
         """Guardar snapshot JSON del heatmap acumulado."""

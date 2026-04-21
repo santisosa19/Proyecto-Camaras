@@ -19,7 +19,9 @@ class Detection:
         bbox: List[float],
         confidence: float,
         class_id: int = 0,
-        track_id: Optional[int] = None
+        track_id: Optional[int] = None,
+        apparent_gender: Optional[str] = None,
+        apparent_gender_confidence: Optional[float] = None,
     ):
         """
         Args:
@@ -32,6 +34,8 @@ class Detection:
         self.confidence = confidence
         self.class_id = class_id
         self.track_id = track_id
+        self.apparent_gender = apparent_gender
+        self.apparent_gender_confidence = apparent_gender_confidence
     
     @property
     def centroid(self) -> Tuple[float, float]:
@@ -52,6 +56,12 @@ class Detection:
             'confidence': float(self.confidence),
             'class_id': self.class_id,
             'track_id': self.track_id,
+            'apparent_gender': self.apparent_gender,
+            'apparent_gender_confidence': (
+                float(self.apparent_gender_confidence)
+                if self.apparent_gender_confidence is not None
+                else None
+            ),
             'centroid': self.centroid,
             'area': float(self.area)
         }

@@ -33,7 +33,7 @@ python run_camera.py
 Para mejorar estabilidad de boxes cuando una persona está quieta o parcialmente ocluida:
 
 ```bash
-YOLO_MODEL_PATH=yolov8s.pt
+YOLO_MODEL_PATH=yolov8n.pt
 YOLO_DEVICE=auto
 YOLO_CONFIDENCE=0.22
 YOLO_IOU=0.60
