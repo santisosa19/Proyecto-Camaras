@@ -6,6 +6,7 @@ from typing import List, Dict, Optional, Tuple
 import numpy as np
 from ultralytics import YOLO
 import cv2
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,10 @@ class PersonDetector:
         model_path: str = "yolov8n.pt",
         confidence_threshold: float = 0.5,
         iou_threshold: float = 0.45,
-        device: str = "cpu"
+        device: str = "cpu",
+        image_size: int = 960,
+        max_detections: int = 100,
+        tracker_config: str = "bytetrack.yaml"
     ):
         """
         Args:
@@ -74,11 +78,17 @@ class PersonDetector:
             confidence_threshold: Umbral de confianza mínimo
             iou_threshold: Umbral de IoU para NMS
             device: 'cpu' o 'cuda' o número de GPU (0, 1, etc.)
+            image_size: Tamaño de inferencia (mayor separa mejor personas cercanas)
+            max_detections: Máximo de detecciones por frame
+            tracker_config: Configuración de tracker YOLOv8
         """
         self.model_path = model_path
         self.confidence_threshold = confidence_threshold
         self.iou_threshold = iou_threshold
-        self.device = device
+        self.device = self._resolve_device(device)
+        self.image_size = int(image_size)
+        self.max_detections = int(max_detections)
+        self.tracker_config = tracker_config
         
         # Estadísticas
         self.stats = {
@@ -89,6 +99,27 @@ class PersonDetector:
         
         logger.info(f"Inicializando PersonDetector con modelo {model_path}")
         self._load_model()
+
+    def _resolve_device(self, requested_device: str) -> str:
+        """Resolver device solicitado con fallback seguro."""
+        normalized = (requested_device or "auto").strip().lower()
+
+        if normalized in {"", "auto"}:
+            if torch.backends.mps.is_available():
+                return "mps"
+            if torch.cuda.is_available():
+                return "cuda"
+            return "cpu"
+
+        if normalized == "mps" and not torch.backends.mps.is_available():
+            logger.warning("YOLO_DEVICE='mps' no disponible. Fallback automático a CPU.")
+            return "cpu"
+
+        if normalized == "cuda" and not torch.cuda.is_available():
+            logger.warning("YOLO_DEVICE='cuda' no disponible. Fallback automático a CPU.")
+            return "cpu"
+
+        return normalized
     
     def _load_model(self):
         """Cargar modelo YOLO"""
@@ -102,6 +133,14 @@ class PersonDetector:
             logger.info(f"✓ Modelo YOLO cargado exitosamente en {self.device}")
             logger.info(f"  Modelo: {self.model_path}")
             logger.info(f"  Clases: {len(self.model.names)}")
+            logger.info(
+                "  Params: conf=%.2f iou=%.2f imgsz=%s max_det=%s tracker=%s",
+                self.confidence_threshold,
+                self.iou_threshold,
+                self.image_size,
+                self.max_detections,
+                self.tracker_config,
+            )
             
         except Exception as e:
             logger.error(f"Error cargando modelo YOLO: {e}")
@@ -134,6 +173,9 @@ class PersonDetector:
                     classes=[0],  # Solo personas
                     conf=self.confidence_threshold,
                     iou=self.iou_threshold,
+                    imgsz=self.image_size,
+                    max_det=self.max_detections,
+                    tracker=self.tracker_config,
                     verbose=False
                 )
             else:
@@ -142,6 +184,8 @@ class PersonDetector:
                     classes=[0],  # Solo personas
                     conf=self.confidence_threshold,
                     iou=self.iou_threshold,
+                    imgsz=self.image_size,
+                    max_det=self.max_detections,
                     verbose=False
                 )
             

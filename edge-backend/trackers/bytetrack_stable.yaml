@@ -1,0 +1,14 @@
+# Stable ByteTrack profile for static indoor cameras.
+# Keeps identities alive for longer when people remain still or are partially occluded.
+
+tracker_type: bytetrack
+
+# Association thresholds.
+track_high_thresh: 0.35
+track_low_thresh: 0.08
+new_track_thresh: 0.30
+match_thresh: 0.75
+
+# Track lifetime in frames before dropping.
+# At ~15 FPS, 120 frames ~= 8 seconds.
+track_buffer: 120

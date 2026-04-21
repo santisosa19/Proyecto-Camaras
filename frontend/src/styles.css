@@ -536,6 +536,76 @@ td small {
   background: #f4fbff;
 }
 
+.heatmap-controls {
+  margin-top: 0.65rem;
+}
+
+.heatmap-grid {
+  margin-top: 0.85rem;
+  display: grid;
+  gap: 0.8rem;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+.heatmap-card {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.heatmap-card-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.7rem;
+}
+
+.heatmap-card-header h4 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.heatmap-card-header small {
+  color: var(--muted);
+}
+
+.heatmap-stage {
+  position: relative;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #0d1f2b;
+}
+
+.heatmap-stage img {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.heatmap-stage .heatmap-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+.heatmap-meta {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.heatmap-meta span {
+  font-size: 0.8rem;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.26rem 0.52rem;
+  background: #f8fbff;
+}
+
 .status-pill,
 .severity-pill {
   border-radius: 999px;

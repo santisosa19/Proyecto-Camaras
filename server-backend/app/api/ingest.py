@@ -1,7 +1,7 @@
 """
 API Router - Ingesta remota (sucursales -> servidor central)
 """
-from datetime import datetime
+from datetime import datetime, time
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database.connection import get_db, DatabaseManager
-from app.models.database import CameraStatus, Detection
+from app.models.database import CameraStatus, Detection, Heatmap
 
 router = APIRouter()
 
@@ -64,6 +64,27 @@ class DetectionSnapshotItem(BaseModel):
 
 class DetectionSnapshotRequest(BaseModel):
     items: list[DetectionSnapshotItem]
+
+
+class HeatmapIngestItem(BaseModel):
+    camera_id: str
+    camera_name: str | None = None
+    branch_id: str | None = None
+    branch_name: str | None = None
+    hour_start: datetime
+    generated_at: datetime | None = None
+    frame_width: int
+    frame_height: int
+    cell_size: int
+    grid: list[list[float]] = Field(default_factory=list)
+    stats: dict[str, Any] = Field(default_factory=dict)
+    background_image_base64: str | None = None
+    overlay_png_base64: str | None = None
+    is_partial: bool = False
+
+
+class HeatmapIngestRequest(BaseModel):
+    items: list[HeatmapIngestItem]
 
 
 @router.post("/crossings")
@@ -172,3 +193,85 @@ async def ingest_detections(
     except Exception as exc:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error guardando detections: {exc}")
+
+
+@router.post("/heatmaps")
+async def ingest_heatmaps(
+    payload: HeatmapIngestRequest,
+    _: None = Depends(_authorize_ingest),
+    db: Session = Depends(get_db)
+):
+    """
+    Ingestar heatmaps por hora en lote (uno por cámara/hora).
+    """
+    if not payload.items:
+        return {"upserted": 0, "updated_cameras": 0}
+
+    try:
+        upserted = 0
+        updated_cameras = 0
+
+        for item in payload.items:
+            hour_start = item.hour_start.replace(minute=0, second=0, microsecond=0)
+            day_start = datetime.combine(hour_start.date(), time.min)
+            hour = int(hour_start.hour)
+
+            row = db.query(Heatmap).filter(
+                Heatmap.camera_id == item.camera_id,
+                Heatmap.date == day_start,
+                Heatmap.hour == hour,
+            ).first()
+
+            heatmap_data = {
+                "hour_start": hour_start.isoformat(),
+                "generated_at": (item.generated_at or datetime.utcnow()).isoformat(),
+                "frame_width": item.frame_width,
+                "frame_height": item.frame_height,
+                "cell_size": item.cell_size,
+                "grid": item.grid,
+                "stats": item.stats,
+                "branch_id": item.branch_id,
+                "branch_name": item.branch_name,
+                "background_image_base64": item.background_image_base64,
+                "overlay_png_base64": item.overlay_png_base64,
+                "is_partial": bool(item.is_partial),
+            }
+
+            if row is None:
+                row = Heatmap(
+                    camera_id=item.camera_id,
+                    date=day_start,
+                    hour=hour,
+                    heatmap_data=heatmap_data,
+                )
+                db.add(row)
+            else:
+                row.heatmap_data = heatmap_data
+
+            status_row = db.query(CameraStatus).filter(
+                CameraStatus.camera_id == item.camera_id
+            ).first()
+            if status_row is None:
+                status_row = CameraStatus(camera_id=item.camera_id)
+                db.add(status_row)
+
+            if item.camera_name:
+                status_row.camera_name = item.camera_name
+            existing_meta = status_row.camera_metadata if isinstance(status_row.camera_metadata, dict) else {}
+            if item.branch_id:
+                existing_meta["branch_id"] = item.branch_id
+            if item.branch_name:
+                existing_meta["branch_name"] = item.branch_name
+            if existing_meta:
+                status_row.camera_metadata = existing_meta
+            status_row.updated_at = datetime.utcnow()
+            status_row.is_active = True
+
+            upserted += 1
+            updated_cameras += 1
+
+        db.commit()
+        return {"upserted": upserted, "updated_cameras": updated_cameras}
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error guardando heatmaps: {exc}")

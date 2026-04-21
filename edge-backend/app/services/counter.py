@@ -125,8 +125,8 @@ class PersonCounter:
         
         # Configuración
         self.max_track_age = 5.0  # Segundos sin actualización antes de eliminar track
-        self.crossing_cooldown_seconds = 2.0
-        self.crossing_merge_distance = 25.0
+        self.crossing_cooldown_seconds = 0.4
+        self.crossing_merge_distance = 5.0
         self.recent_crossings: Dict[str, deque] = defaultdict(lambda: deque(maxlen=200))
         self.crossing_events: deque = deque(maxlen=1000)
         

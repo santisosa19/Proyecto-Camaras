@@ -6,7 +6,8 @@ import time
 import logging
 from typing import Optional, Tuple
 import numpy as np
-from threading import Lock
+from threading import Event, Lock, Thread
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,9 @@ class VideoCapture:
         rtsp_url: str,
         fps: int = 15,
         reconnect_delay: int = 5,
-        max_reconnect_attempts: int = 10
+        max_reconnect_attempts: int = 10,
+        open_timeout_ms: int = 8000,
+        read_timeout_ms: int = 5000
     ):
         """
         Args:
@@ -37,6 +40,8 @@ class VideoCapture:
         self.fps = fps
         self.reconnect_delay = reconnect_delay
         self.max_reconnect_attempts = max_reconnect_attempts
+        self.open_timeout_ms = int(open_timeout_ms)
+        self.read_timeout_ms = int(read_timeout_ms)
         
         self.cap: Optional[cv2.VideoCapture] = None
         self.is_connected = False
@@ -53,6 +58,59 @@ class VideoCapture:
         }
         
         logger.info(f"VideoCapture inicializado para cámara {camera_id}")
+
+    def _read_frame_with_timeout(self, timeout_seconds: float):
+        """Leer un frame con timeout para evitar bloqueos indefinidos."""
+        done = Event()
+        result = {"ret": False, "frame": None, "error": None}
+
+        def _reader():
+            try:
+                ret, frame = self.cap.read()
+                result["ret"] = ret
+                result["frame"] = frame
+            except Exception as exc:
+                result["error"] = exc
+            finally:
+                done.set()
+
+        Thread(target=_reader, daemon=True).start()
+        if not done.wait(timeout_seconds):
+            raise TimeoutError(
+                f"Timeout leyendo frame ({timeout_seconds:.1f}s). "
+                "Posible bloqueo RTSP o cámara sin respuesta."
+            )
+        if result["error"] is not None:
+            raise result["error"]
+        return result["ret"], result["frame"]
+
+    def _open_capture_with_timeout(self, timeout_seconds: float, params: list):
+        """Abrir VideoCapture con timeout para evitar bloqueos en constructor/open."""
+        done = Event()
+        result = {"cap": None, "error": None}
+
+        def _opener():
+            try:
+                try:
+                    cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG, params)
+                except TypeError:
+                    # Fallback para builds de OpenCV que no soportan el 3er argumento.
+                    cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+                result["cap"] = cap
+            except Exception as exc:
+                result["error"] = exc
+            finally:
+                done.set()
+
+        Thread(target=_opener, daemon=True).start()
+        if not done.wait(timeout_seconds):
+            raise TimeoutError(
+                f"Timeout abriendo stream ({timeout_seconds:.1f}s). "
+                "Posible RTSP inaccesible o credenciales incorrectas."
+            )
+        if result["error"] is not None:
+            raise result["error"]
+        return result["cap"]
     
     def connect(self) -> bool:
         """
@@ -66,19 +124,35 @@ class VideoCapture:
                 self.cap.release()
             
             logger.info(f"Conectando a cámara {self.camera_id}: {self.rtsp_url}")
+
+            # En RTSP suele ser más estable usar TCP en OpenCV+FFMPEG.
+            if self.rtsp_url.lower().startswith("rtsp://") and not os.getenv("OPENCV_FFMPEG_CAPTURE_OPTIONS"):
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;5000000"
             
             # Configurar captura con parámetros optimizados
-            self.cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+            params = []
+            if hasattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC"):
+                params.extend([cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, self.open_timeout_ms])
+            if hasattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC"):
+                params.extend([cv2.CAP_PROP_READ_TIMEOUT_MSEC, self.read_timeout_ms])
+
+            logger.info("Abriendo stream RTSP...")
+            self.cap = self._open_capture_with_timeout(self.open_timeout_ms / 1000, params)
             
             # Configurar propiedades
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Buffer mínimo para latencia baja
             self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+            if hasattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC"):
+                self.cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, self.open_timeout_ms)
+            if hasattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC"):
+                self.cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, self.read_timeout_ms)
             
             if not self.cap.isOpened():
                 raise Exception("No se pudo abrir la fuente de video")
             
             # Verificar que podemos leer un frame
-            ret, frame = self.cap.read()
+            logger.info("Leyendo frame de prueba...")
+            ret, frame = self._read_frame_with_timeout(self.read_timeout_ms / 1000)
             if not ret or frame is None:
                 raise Exception("No se pudo leer frame de prueba")
             

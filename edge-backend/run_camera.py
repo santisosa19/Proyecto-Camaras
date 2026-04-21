@@ -15,6 +15,7 @@ MODO DETECCIÓN:
 """
 import sys
 import time
+import base64
 import cv2
 import logging
 import json
@@ -38,6 +39,7 @@ load_dotenv()
 from app.services.video_capture import VideoCapture
 from app.services.detector import PersonDetector
 from app.services.counter import PersonCounter
+from app.services.heatmap import OccupancyHeatmap
 
 
 # Archivo de configuración de líneas
@@ -254,18 +256,23 @@ class RemoteIngestClient:
         max_queue_size: int = 10000,
         crossing_flush_interval: float = 1.0,
         detection_flush_interval: float = 5.0,
+        heatmap_flush_interval: float = 10.0,
     ):
         self.base_url = base_url.rstrip("/")
         self.max_batch_size = max_batch_size
         self.max_queue_size = max(1, max_queue_size)
         self.crossing_flush_interval = crossing_flush_interval
         self.detection_flush_interval = detection_flush_interval
+        self.heatmap_flush_interval = heatmap_flush_interval
         self.pending_crossings: deque = deque()
         self.pending_detections: deque = deque()
+        self.pending_heatmaps: deque = deque()
         self.last_crossing_flush = 0.0
         self.last_detection_flush = 0.0
+        self.last_heatmap_flush = 0.0
         self.dropped_crossings = 0
         self.dropped_detections = 0
+        self.dropped_heatmaps = 0
 
         headers = {"Content-Type": "application/json"}
         if api_key:
@@ -298,6 +305,17 @@ class RemoteIngestClient:
                     self.dropped_detections,
                 )
         self.pending_detections.append(item)
+
+    def enqueue_heatmap(self, item: dict):
+        if len(self.pending_heatmaps) >= self.max_queue_size:
+            self.pending_heatmaps.popleft()
+            self.dropped_heatmaps += 1
+            if self.dropped_heatmaps % 20 == 1:
+                logger.warning(
+                    "Cola de heatmaps llena; se descartaron %s payloads",
+                    self.dropped_heatmaps,
+                )
+        self.pending_heatmaps.append(item)
 
     def _post_batch(self, path: str, key: str, batch: list[dict]) -> bool:
         payload = {key: batch}
@@ -336,6 +354,7 @@ class RemoteIngestClient:
         now = time.time()
         should_flush_crossings = force or (now - self.last_crossing_flush >= self.crossing_flush_interval)
         should_flush_detections = force or (now - self.last_detection_flush >= self.detection_flush_interval)
+        should_flush_heatmaps = force or (now - self.last_heatmap_flush >= self.heatmap_flush_interval)
 
         if should_flush_crossings and self.pending_crossings:
             self._flush_queue(
@@ -354,6 +373,15 @@ class RemoteIngestClient:
                 flush_all=force
             )
             self.last_detection_flush = now
+
+        if should_flush_heatmaps and self.pending_heatmaps:
+            self._flush_queue(
+                queue=self.pending_heatmaps,
+                path="/api/v1/ingest/heatmaps",
+                key="items",
+                flush_all=force
+            )
+            self.last_heatmap_flush = now
 
     def close(self):
         self.client.close()
@@ -404,6 +432,31 @@ class TrafficAnalysisSystem:
         self.branch_id = branch_id.strip()
         self.branch_name = branch_name.strip()
         self.remote_ingest: RemoteIngestClient | None = None
+        self.heatmap: OccupancyHeatmap | None = None
+        self.hourly_heatmap: OccupancyHeatmap | None = None
+        self.current_heatmap_hour_start: datetime | None = None
+
+        # Configuración de mapa de calor
+        self.heatmap_enabled = os.getenv("HEATMAP_ENABLED", "true").lower() == "true"
+        self.show_heatmap_overlay = os.getenv("SHOW_HEATMAP_OVERLAY", "true").lower() == "true"
+        self.save_heatmap_snapshots = os.getenv("SAVE_HEATMAP_SNAPSHOTS", "true").lower() == "true"
+        self.heatmap_keep_history = os.getenv("HEATMAP_KEEP_HISTORY", "false").lower() == "true"
+        self.heatmap_snapshot_interval_seconds = float(
+            os.getenv("HEATMAP_SNAPSHOT_INTERVAL_SECONDS", "60")
+        )
+        self.heatmap_snapshot_interval_seconds = max(5.0, self.heatmap_snapshot_interval_seconds)
+        self.last_heatmap_snapshot = 0.0
+        self.send_hourly_heatmap_to_api = os.getenv("SEND_HOURLY_HEATMAP_TO_API", "true").lower() == "true"
+
+        self.heatmap_background_max_width = max(160, int(os.getenv("HEATMAP_BACKGROUND_MAX_WIDTH", "960")))
+        self.heatmap_background_jpeg_quality = int(os.getenv("HEATMAP_BACKGROUND_JPEG_QUALITY", "68"))
+        self.heatmap_background_jpeg_quality = max(30, min(95, self.heatmap_background_jpeg_quality))
+        self.heatmap_background_refresh_seconds = max(
+            5.0,
+            float(os.getenv("HEATMAP_BACKGROUND_REFRESH_SECONDS", "30"))
+        )
+        self.last_heatmap_background_update = 0.0
+        self.latest_heatmap_background_base64: str | None = None
         
         # Estadísticas
         self.stats = {
@@ -452,16 +505,40 @@ class TrafficAnalysisSystem:
             
             # 2. Detector YOLO
             logger.info("Cargando detector YOLOv8...")
+            yolo_model_path = os.getenv("YOLO_MODEL_PATH", "yolov8s.pt").strip() or "yolov8s.pt"
+            yolo_confidence = float(os.getenv("YOLO_CONFIDENCE", "0.22"))
+            yolo_iou = float(os.getenv("YOLO_IOU", "0.60"))
+            yolo_image_size = int(os.getenv("YOLO_IMAGE_SIZE", "1280"))
+            yolo_max_det = int(os.getenv("YOLO_MAX_DETECTIONS", "120"))
+            yolo_tracker = os.getenv("YOLO_TRACKER", "trackers/bytetrack_stable.yaml").strip() or "trackers/bytetrack_stable.yaml"
+            yolo_device = os.getenv("YOLO_DEVICE", "auto").strip() or "auto"
+            if not os.path.isabs(yolo_tracker):
+                tracker_candidate = Path(__file__).parent / yolo_tracker
+                if tracker_candidate.exists():
+                    yolo_tracker = str(tracker_candidate)
             self.detector = PersonDetector(
-                model_path="yolov8n.pt",
-                confidence_threshold=0.5,
-                device="cpu"  # Cambiar a "cuda" si tienes GPU
+                model_path=yolo_model_path,
+                confidence_threshold=yolo_confidence,
+                iou_threshold=yolo_iou,
+                device=yolo_device,
+                image_size=yolo_image_size,
+                max_detections=yolo_max_det,
+                tracker_config=yolo_tracker
             )
             logger.info("✓ Detector cargado")
             
             # 3. Contador
             logger.info("Inicializando contador...")
             self.counter = PersonCounter(camera_id=self.camera_id)
+            self.counter.crossing_cooldown_seconds = float(os.getenv("CROSSING_COOLDOWN_SECONDS", "0.4"))
+            self.counter.crossing_merge_distance = float(os.getenv("CROSSING_MERGE_DISTANCE", "6.0"))
+            self.counter.max_track_age = float(os.getenv("MAX_TRACK_AGE_SECONDS", "8.0"))
+            logger.info(
+                "Counter params: cooldown=%.2fs merge_distance=%.1f max_track_age=%.1fs",
+                self.counter.crossing_cooldown_seconds,
+                self.counter.crossing_merge_distance,
+                self.counter.max_track_age,
+            )
             
             # Cargar o configurar líneas
             loaded_config = load_lines_configuration(self.camera_id)
@@ -491,11 +568,62 @@ class TrafficAnalysisSystem:
             logger.info(f"Dirección de entrada configurada: {self.entry_direction}")
             
             logger.info("✓ Contador configurado")
+
+            if self.heatmap_enabled:
+                heatmap_output_dir = (
+                    os.getenv("HEATMAP_OUTPUT_DIR", "heatmaps").strip() or "heatmaps"
+                )
+                if not os.path.isabs(heatmap_output_dir):
+                    heatmap_output_dir = str(Path(__file__).parent / heatmap_output_dir)
+                heatmap_cell_size = int(os.getenv("HEATMAP_CELL_SIZE", "24"))
+                heatmap_overlay_alpha = float(os.getenv("HEATMAP_OVERLAY_ALPHA", "0.35"))
+                heatmap_blur_kernel = int(os.getenv("HEATMAP_BLUR_KERNEL", "21"))
+                heatmap_decay = float(os.getenv("HEATMAP_DECAY_PER_SECOND", "0.0"))
+
+                self.heatmap = OccupancyHeatmap(
+                    camera_id=self.camera_id,
+                    cell_size=heatmap_cell_size,
+                    overlay_alpha=heatmap_overlay_alpha,
+                    blur_kernel=heatmap_blur_kernel,
+                    decay_per_second=heatmap_decay,
+                    output_dir=heatmap_output_dir,
+                    metadata={
+                        "camera_name": self.camera_name,
+                        "branch_id": self.branch_id,
+                        "branch_name": self.branch_name,
+                    },
+                )
+                hourly_dir = str(Path(heatmap_output_dir) / "hourly")
+                self.hourly_heatmap = OccupancyHeatmap(
+                    camera_id=f"{self.camera_id}_hourly",
+                    cell_size=heatmap_cell_size,
+                    overlay_alpha=heatmap_overlay_alpha,
+                    blur_kernel=heatmap_blur_kernel,
+                    decay_per_second=0.0,
+                    output_dir=hourly_dir,
+                    metadata={
+                        "camera_name": self.camera_name,
+                        "branch_id": self.branch_id,
+                        "branch_name": self.branch_name,
+                    },
+                )
+                self.current_heatmap_hour_start = datetime.utcnow().replace(
+                    minute=0, second=0, microsecond=0
+                )
+                logger.info(
+                    "✓ Heatmap habilitado (overlay=%s, snapshots=%s, intervalo=%.0fs, hourly_api=%s)",
+                    self.show_heatmap_overlay,
+                    self.save_heatmap_snapshots,
+                    self.heatmap_snapshot_interval_seconds,
+                    self.send_hourly_heatmap_to_api,
+                )
             
             logger.info("=" * 60)
             logger.info("SISTEMA LISTO")
             logger.info("  'q' = Salir")
             logger.info("  'c' = Configurar líneas")
+            logger.info("  'h' = Mostrar/ocultar heatmap")
+            logger.info("  'k' = Resetear heatmap")
             logger.info("=" * 60)
             
         except Exception as e:
@@ -518,6 +646,31 @@ class TrafficAnalysisSystem:
                 
                 # Detectar personas (con tracking)
                 detections = self.detector.detect(frame, track=True)
+                now_ts = time.time()
+                now_dt = datetime.utcnow()
+
+                if self.hourly_heatmap is not None and self.current_heatmap_hour_start is not None:
+                    frame_hour_start = now_dt.replace(minute=0, second=0, microsecond=0)
+                    if frame_hour_start > self.current_heatmap_hour_start:
+                        self._flush_completed_hourly_heatmap(self.current_heatmap_hour_start)
+                        self.hourly_heatmap.reset()
+                        self.current_heatmap_hour_start = frame_hour_start
+
+                if self.heatmap is not None:
+                    self.heatmap.update(
+                        detections=detections,
+                        frame_shape=frame.shape,
+                        timestamp=now_ts,
+                    )
+                if self.hourly_heatmap is not None:
+                    self.hourly_heatmap.update(
+                        detections=detections,
+                        frame_shape=frame.shape,
+                        timestamp=now_ts,
+                    )
+                    if now_ts - self.last_heatmap_background_update >= self.heatmap_background_refresh_seconds:
+                        self.latest_heatmap_background_base64 = self._encode_background_frame(frame)
+                        self.last_heatmap_background_update = now_ts
                 
                 # Actualizar contador
                 count_stats = self.counter.update(detections)
@@ -530,6 +683,9 @@ class TrafficAnalysisSystem:
                 
                 # Dibujar detecciones y líneas en el frame
                 if self.show_window:
+                    if self.heatmap is not None and self.show_heatmap_overlay:
+                        frame = self.heatmap.render_overlay(frame)
+
                     # Dibujar bounding boxes
                     for det in detections:
                         x1, y1, x2, y2 = [int(x) for x in det.bbox]
@@ -562,6 +718,12 @@ class TrafficAnalysisSystem:
                     # Agregar conteos de todas las líneas
                     for line_name, line_stats in count_stats.get('lines', {}).items():
                         info_lines.append(f"{line_name}: +{line_stats['positive']} -{line_stats['negative']}")
+
+                    if self.heatmap is not None:
+                        hm_stats = self.heatmap.get_stats()
+                        info_lines.append(
+                            f"Heat max: {hm_stats['max_value']:.2f} samples: {hm_stats['samples']}"
+                        )
                     
                     # Dibujar info en pantalla
                     y_offset = 30
@@ -586,6 +748,20 @@ class TrafficAnalysisSystem:
                         self._configure_lines()
                         # Reiniciar contador con nuevas líneas
                         self._reload_counter()
+                    elif key == ord('h') and self.heatmap is not None:
+                        self.show_heatmap_overlay = not self.show_heatmap_overlay
+                        logger.info(
+                            "Heatmap overlay %s",
+                            "habilitado" if self.show_heatmap_overlay else "deshabilitado",
+                        )
+                    elif key == ord('k') and self.heatmap is not None:
+                        self.heatmap.reset()
+                        if self.hourly_heatmap is not None:
+                            self.hourly_heatmap.reset()
+                            self.current_heatmap_hour_start = datetime.utcnow().replace(
+                                minute=0, second=0, microsecond=0
+                            )
+                        logger.info("Heatmap reseteado")
                 
                 # Mostrar estadísticas en consola cada 30 frames
                 if frame_count % 30 == 0:
@@ -604,6 +780,14 @@ class TrafficAnalysisSystem:
                         self._save_to_database(detections)
                     if self.save_to_api:
                         self._queue_detection_snapshot(detections)
+
+                if (
+                    self.heatmap is not None
+                    and self.save_heatmap_snapshots
+                    and (now_ts - self.last_heatmap_snapshot >= self.heatmap_snapshot_interval_seconds)
+                ):
+                    self._save_heatmap_snapshot()
+                    self.last_heatmap_snapshot = now_ts
 
                 if self.save_to_api and self.remote_ingest is not None:
                     self.remote_ingest.flush()
@@ -631,6 +815,16 @@ class TrafficAnalysisSystem:
                 f"{line_name} - Positive: {line_stats['positive']} | "
                 f"Negative: {line_stats['negative']} | "
                 f"Total: {line_stats['total']}"
+            )
+
+        if self.heatmap is not None:
+            hm_stats = self.heatmap.get_stats()
+            logger.info(
+                "Heatmap - max: %.2f | sum: %.2f | samples: %s | hotspot: %s",
+                hm_stats["max_value"],
+                hm_stats["sum_value"],
+                hm_stats["samples"],
+                hm_stats["hotspot"],
             )
         
         logger.info("=" * 60)
@@ -743,6 +937,74 @@ class TrafficAnalysisSystem:
             "error_count": capture_stats.get('error_count', 0),
         }
         self.remote_ingest.enqueue_detection(payload)
+
+    def _save_heatmap_snapshot(self):
+        """Guardar snapshot JSON del heatmap acumulado."""
+        if self.heatmap is None:
+            return
+        try:
+            snapshot_path = self.heatmap.save_snapshot(keep_history=self.heatmap_keep_history)
+            if snapshot_path is not None:
+                logger.debug("Heatmap snapshot guardado en %s", snapshot_path)
+        except Exception as e:
+            logger.error(f"Error guardando snapshot de heatmap: {e}")
+
+    def _encode_background_frame(self, frame):
+        """Codificar frame de referencia para visualización remota del heatmap."""
+        try:
+            if frame is None:
+                return None
+            h, w = frame.shape[:2]
+            if w > self.heatmap_background_max_width:
+                scale = self.heatmap_background_max_width / float(w)
+                resized = cv2.resize(
+                    frame,
+                    (self.heatmap_background_max_width, int(h * scale)),
+                    interpolation=cv2.INTER_AREA,
+                )
+            else:
+                resized = frame
+            ok, encoded = cv2.imencode(
+                ".jpg",
+                resized,
+                [int(cv2.IMWRITE_JPEG_QUALITY), self.heatmap_background_jpeg_quality],
+            )
+            if not ok:
+                return None
+            return base64.b64encode(encoded.tobytes()).decode("ascii")
+        except Exception as exc:
+            logger.debug("No se pudo codificar background de heatmap: %s", exc)
+            return None
+
+    def _flush_completed_hourly_heatmap(self, completed_hour_start: datetime, is_partial: bool = False):
+        """Enviar al backend central el heatmap de la hora cerrada."""
+        if self.hourly_heatmap is None:
+            return
+        if self.remote_ingest is None or not self.save_to_api or not self.send_hourly_heatmap_to_api:
+            return
+
+        stats = self.hourly_heatmap.get_stats()
+        if stats["sum_value"] <= 0:
+            return
+
+        snapshot = self.hourly_heatmap.snapshot()
+        payload = {
+            "camera_id": self.camera_id,
+            "camera_name": self.camera_name,
+            "branch_id": self.branch_id or None,
+            "branch_name": self.branch_name or None,
+            "hour_start": completed_hour_start.isoformat(),
+            "generated_at": datetime.utcnow().isoformat(),
+            "frame_width": snapshot["frame_width"],
+            "frame_height": snapshot["frame_height"],
+            "cell_size": snapshot["cell_size"],
+            "grid": snapshot["grid"],
+            "stats": snapshot["stats"],
+            "background_image_base64": self.latest_heatmap_background_base64,
+            "overlay_png_base64": self.hourly_heatmap.export_overlay_png_base64(),
+            "is_partial": is_partial,
+        }
+        self.remote_ingest.enqueue_heatmap(payload)
     
     def _configure_lines(self):
         """Entrar al modo de configuración de líneas"""
@@ -788,8 +1050,16 @@ class TrafficAnalysisSystem:
             self.capture.release()
 
         if self.remote_ingest is not None:
+            if self.hourly_heatmap is not None and self.current_heatmap_hour_start is not None:
+                self._flush_completed_hourly_heatmap(
+                    self.current_heatmap_hour_start,
+                    is_partial=True,
+                )
             self.remote_ingest.flush(force=True)
             self.remote_ingest.close()
+
+        if self.heatmap is not None and self.save_heatmap_snapshots:
+            self._save_heatmap_snapshot()
         
         if self.show_window:
             cv2.destroyAllWindows()
@@ -803,6 +1073,15 @@ class TrafficAnalysisSystem:
         logger.info(f"Frames procesados: {self.stats['frames_processed']}")
         logger.info(f"FPS promedio: {self.stats['frames_processed'] / uptime:.1f}")
         logger.info(f"Detecciones totales: {self.stats['total_detections']}")
+        if self.heatmap is not None:
+            hm_stats = self.heatmap.get_stats()
+            logger.info(
+                "Heatmap final - max: %.2f | sum: %.2f | samples: %s | hotspot: %s",
+                hm_stats["max_value"],
+                hm_stats["sum_value"],
+                hm_stats["samples"],
+                hm_stats["hotspot"],
+            )
         logger.info("=" * 60)
         logger.info("✓ Sistema finalizado")
 

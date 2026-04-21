@@ -1,4 +1,4 @@
-#!/Users/santiagososa/Desktop/traffic-analysis-system/edge-backend/.venv/bin/python
+#!/Users/santiagososa/traffic-analysis-system/edge-backend/.venv/bin/python3.11
 import sys
 from pip._internal.cli.main import main
 if __name__ == '__main__':

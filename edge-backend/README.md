@@ -28,6 +28,52 @@ python -m pip install -r requirements.txt
 python run_camera.py
 ```
 
+## Ajuste de precisión/tracking (opcional)
+
+Para mejorar estabilidad de boxes cuando una persona está quieta o parcialmente ocluida:
+
+```bash
+YOLO_MODEL_PATH=yolov8s.pt
+YOLO_DEVICE=auto
+YOLO_CONFIDENCE=0.22
+YOLO_IOU=0.60
+YOLO_IMAGE_SIZE=1280
+YOLO_TRACKER=trackers/bytetrack_stable.yaml
+MAX_TRACK_AGE_SECONDS=8
+```
+
+## Heatmap de ocupación (nuevo)
+
+El edge ahora acumula un mapa de calor por cámara usando centroides de detección.
+
+Controles en ventana:
+- `h`: mostrar/ocultar overlay del heatmap
+- `k`: resetear acumulación del heatmap
+
+Variables recomendadas:
+
+```bash
+HEATMAP_ENABLED=true
+SHOW_HEATMAP_OVERLAY=true
+HEATMAP_CELL_SIZE=24
+HEATMAP_OVERLAY_ALPHA=0.35
+HEATMAP_BLUR_KERNEL=21
+HEATMAP_DECAY_PER_SECOND=0.0
+SAVE_HEATMAP_SNAPSHOTS=true
+HEATMAP_SNAPSHOT_INTERVAL_SECONDS=60
+HEATMAP_OUTPUT_DIR=heatmaps
+HEATMAP_KEEP_HISTORY=false
+SEND_HOURLY_HEATMAP_TO_API=true
+HEATMAP_BACKGROUND_MAX_WIDTH=960
+HEATMAP_BACKGROUND_JPEG_QUALITY=68
+HEATMAP_BACKGROUND_REFRESH_SECONDS=30
+```
+
+Snapshots generados:
+- archivo `latest`: `heatmaps/<camera_id>_heatmap_latest.json`
+- opcional histórico por timestamp si `HEATMAP_KEEP_HISTORY=true`
+- ingesta central por hora (si `SAVE_TO_API=true`): endpoint `/api/v1/ingest/heatmaps`
+
 ## Docker
 
 ```bash

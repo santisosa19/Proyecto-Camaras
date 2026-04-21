@@ -1,5 +1,5 @@
+import React, { useEffect, useMemo, useState } from "react";
 import { Link, Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
-import { useEffect, useMemo, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -100,10 +100,22 @@ function chartTickLabel(isoDate, windowHours) {
   return dt.toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit" });
 }
 
+function formatSlotLabel(slot) {
+  if (!slot?.date || slot?.hour === undefined || slot?.hour === null) return "-";
+  const hour = String(slot.hour).padStart(2, "0");
+  return `${slot.date} ${hour}:00`;
+}
+
 function useAuth() {
   const [user, setUser] = useState(() => {
-    const raw = localStorage.getItem("traffic_user");
-    return raw ? JSON.parse(raw) : null;
+    try {
+      const raw = localStorage.getItem("traffic_user");
+      return raw ? JSON.parse(raw) : null;
+    } catch (err) {
+      console.error("No se pudo parsear traffic_user desde localStorage:", err);
+      localStorage.removeItem("traffic_user");
+      return null;
+    }
   });
 
   const login = (username, password) => {
@@ -332,6 +344,64 @@ function CameraLoadChart({ cameras }) {
           <Line yAxisId="right" type="monotone" dataKey="error_count" name="Errores" stroke={CHART_COLORS.offline} strokeWidth={2} />
         </ComposedChart>
       </ResponsiveContainer>
+    </div>
+  );
+}
+
+function HeatmapCameraGrid({ cameras, overlayOpacity }) {
+  const rows = cameras || [];
+
+  if (!rows.length) {
+    return <div className="empty-state">La sucursal no tiene cámaras asociadas.</div>;
+  }
+
+  return (
+    <div className="heatmap-grid">
+      {rows.map((camera) => {
+        const heatmap = camera.heatmap;
+        const backgroundSrc = heatmap?.background_image_base64
+          ? `data:image/jpeg;base64,${heatmap.background_image_base64}`
+          : null;
+        const overlaySrc = heatmap?.overlay_png_base64
+          ? `data:image/png;base64,${heatmap.overlay_png_base64}`
+          : null;
+        const stats = heatmap?.stats || {};
+
+        return (
+          <article className="panel heatmap-card" key={camera.camera_id}>
+            <div className="heatmap-card-header">
+              <div>
+                <h4>{camera.camera_name || camera.camera_id}</h4>
+                <small>{camera.camera_id}</small>
+              </div>
+              <StatusPill online={camera.is_connected} />
+            </div>
+
+            {backgroundSrc && overlaySrc ? (
+              <div className="heatmap-stage">
+                <img src={backgroundSrc} alt={`Referencia ${camera.camera_name || camera.camera_id}`} />
+                <img
+                  src={overlaySrc}
+                  alt={`Heatmap ${camera.camera_name || camera.camera_id}`}
+                  className="heatmap-overlay"
+                  style={{ opacity: overlayOpacity }}
+                />
+              </div>
+            ) : (
+              <div className="empty-state">Sin heatmap para esta cámara en la hora seleccionada.</div>
+            )}
+
+            <div className="heatmap-meta">
+              <span>Muestras: {formatNumber(stats.samples || 0)}</span>
+              <span>Intensidad máx: {Number(stats.max_value || 0).toFixed(2)}</span>
+              <span>
+                Hotspot:{" "}
+                {stats.hotspot ? `${formatNumber(stats.hotspot.x)}, ${formatNumber(stats.hotspot.y)}` : "-"}
+              </span>
+            </div>
+          </article>
+        );
+      })}
     </div>
   );
 }
@@ -669,6 +739,10 @@ function BranchDetailPage({ user }) {
   const [refreshSeconds, setRefreshSeconds] = useState(30);
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
+  const [heatmapData, setHeatmapData] = useState(null);
+  const [heatmapError, setHeatmapError] = useState("");
+  const [selectedHeatmapSlot, setSelectedHeatmapSlot] = useState("");
+  const [overlayOpacity, setOverlayOpacity] = useState(0.58);
 
   useEffect(() => {
     let cancelled = false;
@@ -694,6 +768,47 @@ function BranchDetailPage({ user }) {
       if (intervalId) clearInterval(intervalId);
     };
   }, [branchId, hours, refreshSeconds]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadHeatmaps = async () => {
+      try {
+        let targetDate;
+        let targetHour;
+        if (selectedHeatmapSlot) {
+          const [slotDate, slotHour] = selectedHeatmapSlot.split("|");
+          targetDate = slotDate;
+          const parsedHour = Number(slotHour);
+          if (!Number.isNaN(parsedHour)) targetHour = parsedHour;
+        }
+
+        const query = toQuery({ target_date: targetDate, hour: targetHour });
+        const payload = await fetchJson(`/api/v1/dashboard/branches/${branchId}/heatmaps?${query}`);
+        if (!cancelled) {
+          setHeatmapData(payload);
+          setHeatmapError("");
+          const selected = payload?.selected_slot;
+          if (selected?.date !== undefined && selected?.hour !== undefined) {
+            const canonical = `${selected.date}|${selected.hour}`;
+            if (canonical !== selectedHeatmapSlot) {
+              setSelectedHeatmapSlot(canonical);
+            }
+          }
+        }
+      } catch (err) {
+        if (!cancelled) setHeatmapError(err.message);
+      }
+    };
+
+    loadHeatmaps();
+    const intervalId = refreshSeconds > 0 ? setInterval(loadHeatmaps, refreshSeconds * 1000) : null;
+
+    return () => {
+      cancelled = true;
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [branchId, selectedHeatmapSlot, refreshSeconds]);
 
   if (user.role === "branch_manager" && user.branch_id !== branchId) {
     return <Navigate to="/branches" replace />;
@@ -749,6 +864,52 @@ function BranchDetailPage({ user }) {
           <p>Conteo actual y errores reportados</p>
         </div>
         <CameraLoadChart cameras={data.cameras || []} />
+      </article>
+
+      <article className="panel">
+        <div className="panel-header">
+          <h3>Mapa de calor por hora</h3>
+          <p>Overlay por cámara para la hora seleccionada</p>
+        </div>
+
+        <div className="controls-row heatmap-controls">
+          <div className="control-group">
+            <label>Hora</label>
+            <select value={selectedHeatmapSlot} onChange={(event) => setSelectedHeatmapSlot(event.target.value)}>
+              {(heatmapData?.available_slots || []).length === 0 ? (
+                <option value="">Sin slots disponibles</option>
+              ) : null}
+              {(heatmapData?.available_slots || []).map((slot) => {
+                const value = `${slot.date}|${slot.hour}`;
+                return (
+                  <option key={value} value={value}>
+                    {formatSlotLabel(slot)} ({slot.camera_count} cams)
+                  </option>
+                );
+              })}
+            </select>
+          </div>
+
+          <div className="control-group">
+            <label>Opacidad overlay ({Math.round(overlayOpacity * 100)}%)</label>
+            <input
+              type="range"
+              min="0.15"
+              max="0.95"
+              step="0.05"
+              value={overlayOpacity}
+              onChange={(event) => setOverlayOpacity(Number(event.target.value))}
+            />
+          </div>
+
+          <div className="updated-at">
+            Slot actual: {heatmapData?.selected_slot ? formatSlotLabel(heatmapData.selected_slot) : "Sin datos"}
+          </div>
+        </div>
+
+        {heatmapError ? <div className="error-box">Error cargando heatmaps: {heatmapError}</div> : null}
+
+        <HeatmapCameraGrid cameras={heatmapData?.cameras || []} overlayOpacity={overlayOpacity} />
       </article>
 
       <article className="panel">
@@ -812,6 +973,45 @@ function BranchDetailPage({ user }) {
   );
 }
 
+class AppErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error("Error de render en dashboard:", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="login-wrap">
+          <div className="login-card">
+            <h1>Error de interfaz</h1>
+            <p>La página falló al renderizar. Probá refrescar y limpiar sesión local.</p>
+            <button
+              type="button"
+              onClick={() => {
+                localStorage.removeItem("traffic_user");
+                window.location.reload();
+              }}
+            >
+              Limpiar sesión y recargar
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
 function PrivateApp({ user, logout }) {
   return (
     <AppLayout user={user} onLogout={logout}>
@@ -826,6 +1026,14 @@ function PrivateApp({ user, logout }) {
 }
 
 export default function App() {
+  return (
+    <AppErrorBoundary>
+      <AppContent />
+    </AppErrorBoundary>
+  );
+}
+
+function AppContent() {
   const { user, login, logout } = useAuth();
 
   if (!user) {

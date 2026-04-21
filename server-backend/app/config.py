@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:8000"]
     
     # YOLO Detection
-    YOLO_MODEL: str = "yolov8n.pt"
+    YOLO_MODEL: str = "yolov8s.pt"
     DETECTION_CONFIDENCE: float = 0.5
     TRACKING_MAX_AGE: int = 30
     TRACKING_MIN_HITS: int = 3

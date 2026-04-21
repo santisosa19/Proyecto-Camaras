@@ -2,7 +2,7 @@
 API Router - Dashboard multi-sucursal
 """
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query
@@ -10,7 +10,7 @@ from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from app.database.connection import get_db
-from app.models.database import CameraStatus, CrossingEvent, Detection
+from app.models.database import CameraStatus, CrossingEvent, Detection, Heatmap
 
 router = APIRouter()
 
@@ -269,6 +269,54 @@ def _sort_branches(
     return sorted(branches, key=lambda item: item["online_ratio"], reverse=reverse)
 
 
+def _list_heatmap_slots(db: Session, camera_ids: list[str], limit: int = 72) -> list[dict[str, Any]]:
+    if not camera_ids:
+        return []
+
+    rows = (
+        db.query(
+            Heatmap.date,
+            Heatmap.hour,
+            func.count(Heatmap.id).label("camera_count"),
+        )
+        .filter(Heatmap.camera_id.in_(camera_ids))
+        .group_by(Heatmap.date, Heatmap.hour)
+        .order_by(Heatmap.date.desc(), Heatmap.hour.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "date": row.date.date().isoformat() if isinstance(row.date, datetime) else str(row.date),
+            "hour": int(row.hour),
+            "camera_count": int(row.camera_count or 0),
+        }
+        for row in rows
+    ]
+
+
+def _pick_heatmap_slot(
+    available_slots: list[dict[str, Any]],
+    target_date: date | None,
+    target_hour: int | None,
+) -> tuple[date | None, int | None]:
+    if not available_slots:
+        return None, None
+
+    if target_date is not None and target_hour is not None:
+        return target_date, int(target_hour)
+
+    if target_date is not None:
+        target_date_iso = target_date.isoformat()
+        same_day = [slot for slot in available_slots if slot["date"] == target_date_iso]
+        if same_day:
+            picked = max(same_day, key=lambda item: int(item["hour"]))
+            return target_date, int(picked["hour"])
+
+    latest = available_slots[0]
+    return date.fromisoformat(latest["date"]), int(latest["hour"])
+
+
 @router.get("/overview")
 async def get_overview(
     hours: int = Query(default=24, ge=1, le=168),
@@ -415,4 +463,71 @@ async def get_branch_detail(
         "cameras": cameras_payload,
         "alerts": branch_alerts[:10],
         "hourly_flow": flow_series,
+    }
+
+
+@router.get("/branches/{branch_id}/heatmaps")
+async def get_branch_heatmaps(
+    branch_id: str,
+    target_date: date | None = Query(default=None),
+    hour: int | None = Query(default=None, ge=0, le=23),
+    db: Session = Depends(get_db),
+):
+    """
+    Heatmaps horarios por sucursal (uno por cámara para el slot seleccionado).
+    """
+    cameras = db.query(CameraStatus).all()
+    branch_cameras = [camera for camera in cameras if _camera_branch_info(camera)[0] == branch_id]
+    camera_ids = [camera.camera_id for camera in branch_cameras]
+    branch_name = _camera_branch_info(branch_cameras[0])[1] if branch_cameras else branch_id
+
+    available_slots = _list_heatmap_slots(db, camera_ids=camera_ids, limit=96)
+    selected_date, selected_hour = _pick_heatmap_slot(
+        available_slots=available_slots,
+        target_date=target_date,
+        target_hour=hour,
+    )
+
+    selected_rows_by_camera: dict[str, Heatmap] = {}
+    if selected_date is not None and selected_hour is not None and camera_ids:
+        day_start = datetime.combine(selected_date, dt_time.min)
+        rows = (
+            db.query(Heatmap)
+            .filter(
+                Heatmap.camera_id.in_(camera_ids),
+                Heatmap.date == day_start,
+                Heatmap.hour == selected_hour,
+            )
+            .all()
+        )
+        selected_rows_by_camera = {row.camera_id: row for row in rows}
+
+    cameras_payload = []
+    for camera in branch_cameras:
+        row = selected_rows_by_camera.get(camera.camera_id)
+        heatmap_data = row.heatmap_data if row and isinstance(row.heatmap_data, dict) else None
+        cameras_payload.append(
+            {
+                "camera_id": camera.camera_id,
+                "camera_name": camera.camera_name,
+                "is_connected": bool(camera.is_connected),
+                "last_frame_at": camera.last_frame_at,
+                "heatmap": heatmap_data,
+            }
+        )
+
+    populated = sum(1 for camera in cameras_payload if camera["heatmap"] is not None)
+    return {
+        "timestamp": _utcnow().isoformat(),
+        "branch_id": branch_id,
+        "branch_name": branch_name,
+        "selected_slot": (
+            {"date": selected_date.isoformat(), "hour": selected_hour}
+            if selected_date is not None and selected_hour is not None
+            else None
+        ),
+        "available_slots": available_slots,
+        "total_cameras": len(branch_cameras),
+        "cameras_with_heatmap": populated,
+        "cameras": cameras_payload,
     }
