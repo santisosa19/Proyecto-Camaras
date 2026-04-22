@@ -4,17 +4,17 @@
       {
         "name": "main_gate",
         "p1": [
-          259,
-          136
+          270,
+          148
         ],
         "p2": [
-          448,
-          138
+          442,
+          148
         ],
         "direction": "both"
       }
     ],
     "entry_direction": "negative",
-    "configured_at": "2026-04-21T10:40:50.389312"
+    "configured_at": "2026-04-22T09:49:28.419051"
   }
 }

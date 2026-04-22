@@ -19,6 +19,19 @@ def _utcnow() -> datetime:
     return datetime.utcnow()
 
 
+def _empty_gender_bucket() -> dict[str, int]:
+    return {"male": 0, "female": 0, "unknown": 0}
+
+
+def _normalize_apparent_gender(value: Any) -> str:
+    raw = (str(value).strip().lower() if value is not None else "")
+    if raw in {"male", "m", "man", "masculino", "hombre"}:
+        return "male"
+    if raw in {"female", "f", "woman", "femenino", "mujer"}:
+        return "female"
+    return "unknown"
+
+
 def _camera_branch_info(camera: CameraStatus) -> tuple[str, str]:
     metadata = camera.camera_metadata if isinstance(camera.camera_metadata, dict) else {}
     branch_id = (
@@ -93,6 +106,60 @@ def _crossings_today_by_camera(db: Session, camera_ids: list[str]) -> dict[str, 
         if row.event_type in bucket:
             bucket[row.event_type] = int(row.count or 0)
     return result
+
+
+def _crossings_today_with_gender_by_camera(
+    db: Session,
+    camera_ids: list[str],
+) -> tuple[dict[str, dict[str, int]], dict[str, dict[str, dict[str, int]]]]:
+    if not camera_ids:
+        return {}, {}
+
+    counts = {camera_id: {"entry": 0, "exit": 0} for camera_id in camera_ids}
+    gender_counts = {
+        camera_id: {"entry": _empty_gender_bucket(), "exit": _empty_gender_bucket()}
+        for camera_id in camera_ids
+    }
+
+    start = datetime.combine(date.today(), datetime.min.time())
+    end = start + timedelta(days=1)
+    rows = (
+        db.query(
+            CrossingEvent.camera_id,
+            CrossingEvent.event_type,
+            CrossingEvent.event_metadata,
+        )
+        .filter(
+            CrossingEvent.camera_id.in_(camera_ids),
+            CrossingEvent.timestamp >= start,
+            CrossingEvent.timestamp < end,
+        )
+        .all()
+    )
+
+    for row in rows:
+        if row.event_type not in {"entry", "exit"}:
+            continue
+        counts[row.camera_id][row.event_type] += 1
+
+        metadata = row.event_metadata if isinstance(row.event_metadata, dict) else {}
+        gender = _normalize_apparent_gender(metadata.get("apparent_gender"))
+        gender_counts[row.camera_id][row.event_type][gender] += 1
+
+    return counts, gender_counts
+
+
+def _sum_gender_counts(
+    gender_counts_by_camera: dict[str, dict[str, dict[str, int]]],
+    event_type: Literal["entry", "exit"],
+) -> dict[str, int]:
+    total = _empty_gender_bucket()
+    for camera_counts in gender_counts_by_camera.values():
+        bucket = camera_counts.get(event_type) or {}
+        total["male"] += int(bucket.get("male", 0))
+        total["female"] += int(bucket.get("female", 0))
+        total["unknown"] += int(bucket.get("unknown", 0))
+    return total
 
 
 def _hourly_flow(
@@ -422,7 +489,7 @@ async def get_branch_detail(
     camera_ids = [camera.camera_id for camera in branch_cameras]
 
     latest_counts = _latest_counts_by_camera(db, camera_ids)
-    crossings_by_camera = _crossings_today_by_camera(db, camera_ids)
+    crossings_by_camera, crossings_gender_by_camera = _crossings_today_with_gender_by_camera(db, camera_ids)
     flow_series = _hourly_flow(db, camera_ids, since=_utcnow() - timedelta(hours=hours))
 
     cameras_payload = []
@@ -438,6 +505,8 @@ async def get_branch_detail(
                 "current_count": latest_counts.get(camera.camera_id, 0),
                 "entry_today": crossings_by_camera.get(camera.camera_id, {}).get("entry", 0),
                 "exit_today": crossings_by_camera.get(camera.camera_id, {}).get("exit", 0),
+                "entry_by_gender": crossings_gender_by_camera.get(camera.camera_id, {}).get("entry", _empty_gender_bucket()),
+                "exit_by_gender": crossings_gender_by_camera.get(camera.camera_id, {}).get("exit", _empty_gender_bucket()),
             }
         )
 
@@ -446,6 +515,8 @@ async def get_branch_detail(
     online_cameras = sum(1 for camera in branch_cameras if camera.is_connected)
     branch_alerts = _build_alerts(branch_cameras, latest_counts)
     occupancy_peak = max((item["occupancy_end"] for item in flow_series), default=0)
+    entries_by_gender = _sum_gender_counts(crossings_gender_by_camera, "entry")
+    exits_by_gender = _sum_gender_counts(crossings_gender_by_camera, "exit")
 
     return {
         "timestamp": _utcnow().isoformat(),
@@ -454,6 +525,8 @@ async def get_branch_detail(
         "branch_name": _camera_branch_info(branch_cameras[0])[1] if branch_cameras else branch_id,
         "entries_today": entries_today,
         "exits_today": exits_today,
+        "entries_by_gender": entries_by_gender,
+        "exits_by_gender": exits_by_gender,
         "net_today": entries_today - exits_today,
         "current_occupancy": sum(latest_counts.values()),
         "occupancy_peak": occupancy_peak,

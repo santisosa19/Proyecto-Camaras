@@ -454,6 +454,10 @@ class TrafficAnalysisSystem:
             15.0,
             float(os.getenv("HOURLY_HEATMAP_PARTIAL_FLUSH_SECONDS", "60")),
         )
+        self.hourly_heatmap_min_nonzero_intensity = max(
+            0,
+            min(80, int(os.getenv("HOURLY_HEATMAP_MIN_NONZERO_INTENSITY", "12"))),
+        )
         self.last_hourly_heatmap_partial_flush = 0.0
 
         self.heatmap_background_max_width = max(160, int(os.getenv("HEATMAP_BACKGROUND_MAX_WIDTH", "960")))
@@ -587,6 +591,23 @@ class TrafficAnalysisSystem:
                 gender_model_prototxt = str(Path(__file__).parent / gender_model_prototxt)
             if gender_model_weights and not os.path.isabs(gender_model_weights):
                 gender_model_weights = str(Path(__file__).parent / gender_model_weights)
+            gender_sample_every_n_frames = int(os.getenv("GENDER_SAMPLE_EVERY_N_FRAMES", "10"))
+            gender_vote_window = int(os.getenv("GENDER_VOTE_WINDOW", "12"))
+            gender_min_votes = int(os.getenv("GENDER_MIN_VOTES", "5"))
+            gender_confidence_threshold = float(os.getenv("GENDER_CONFIDENCE_THRESHOLD", "0.64"))
+            gender_aggregate_confidence_threshold = float(
+                os.getenv("GENDER_AGGREGATE_CONFIDENCE_THRESHOLD", "0.67")
+            )
+            gender_female_confidence_threshold = float(
+                os.getenv("GENDER_FEMALE_CONFIDENCE_THRESHOLD", "0.78")
+            )
+            gender_lock_confidence_threshold = float(
+                os.getenv("GENDER_LOCK_CONFIDENCE_THRESHOLD", "0.72")
+            )
+            gender_lock_min_votes = int(os.getenv("GENDER_LOCK_MIN_VOTES", "6"))
+            gender_flip_margin = float(os.getenv("GENDER_FLIP_MARGIN", "0.18"))
+            gender_flip_min_votes = int(os.getenv("GENDER_FLIP_MIN_VOTES", "6"))
+            gender_stale_track_seconds = float(os.getenv("GENDER_STALE_TRACK_SECONDS", "25"))
 
             self.gender_estimator = ApparentGenderEstimator(
                 enabled=apparent_gender_enabled,
@@ -594,11 +615,17 @@ class TrafficAnalysisSystem:
                 model_weights_path=gender_model_weights,
                 model_dir=gender_model_dir,
                 auto_download=os.getenv("GENDER_AUTO_DOWNLOAD_MODEL", "true").lower() == "true",
-                sample_every_n_frames=int(os.getenv("GENDER_SAMPLE_EVERY_N_FRAMES", "10")),
-                vote_window=int(os.getenv("GENDER_VOTE_WINDOW", "12")),
-                min_votes=int(os.getenv("GENDER_MIN_VOTES", "4")),
-                confidence_threshold=float(os.getenv("GENDER_CONFIDENCE_THRESHOLD", "0.58")),
-                stale_track_seconds=float(os.getenv("GENDER_STALE_TRACK_SECONDS", "25")),
+                sample_every_n_frames=gender_sample_every_n_frames,
+                vote_window=gender_vote_window,
+                min_votes=gender_min_votes,
+                confidence_threshold=gender_confidence_threshold,
+                aggregate_confidence_threshold=gender_aggregate_confidence_threshold,
+                female_confidence_threshold=gender_female_confidence_threshold,
+                lock_confidence_threshold=gender_lock_confidence_threshold,
+                lock_min_votes=gender_lock_min_votes,
+                flip_margin=gender_flip_margin,
+                flip_min_votes=gender_flip_min_votes,
+                stale_track_seconds=gender_stale_track_seconds,
             )
             if self.gender_estimator.enabled:
                 logger.info("✓ Género aparente habilitado")
@@ -636,6 +663,7 @@ class TrafficAnalysisSystem:
                     overlay_alpha=heatmap_overlay_alpha,
                     blur_kernel=heatmap_blur_kernel,
                     decay_per_second=0.0,
+                    min_nonzero_intensity=self.hourly_heatmap_min_nonzero_intensity,
                     output_dir=hourly_dir,
                     metadata={
                         "camera_name": self.camera_name,
@@ -755,11 +783,14 @@ class TrafficAnalysisSystem:
                         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                         
                         # Label con ID y confianza
-                        gender_short = "?"
-                        if det.apparent_gender == "male":
+                        if self.gender_estimator is None or not self.gender_estimator.enabled:
+                            gender_short = "OFF"
+                        elif det.apparent_gender == "male":
                             gender_short = "M"
                         elif det.apparent_gender == "female":
                             gender_short = "F"
+                        else:
+                            gender_short = "U"
                         track_label = det.track_id if det.track_id is not None else "-"
                         label = f"ID:{track_label} G:{gender_short} {det.confidence:.2f}"
                         cv2.putText(

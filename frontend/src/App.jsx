@@ -106,6 +106,13 @@ function formatSlotLabel(slot) {
   return `${slot.date} ${hour}:00`;
 }
 
+function genderTitle(kind, gender) {
+  const prefix = kind === "entry" ? "Entradas" : "Salidas";
+  if (gender === "male") return `${prefix} - Masculino`;
+  if (gender === "female") return `${prefix} - Femenino`;
+  return `${prefix} - Sin clasificar`;
+}
+
 function useAuth() {
   const [user, setUser] = useState(() => {
     try {
@@ -816,6 +823,8 @@ function BranchDetailPage({ user }) {
 
   if (error) return <div className="panel error-box">Error cargando detalle: {error}</div>;
   if (!data) return <div className="panel">Cargando detalle...</div>;
+  const entriesByGender = data.entries_by_gender || {};
+  const exitsByGender = data.exits_by_gender || {};
 
   return (
     <section className="branch-detail-page">
@@ -849,6 +858,21 @@ function BranchDetailPage({ user }) {
         <KpiCard title="Salidas hoy" value={formatNumber(data.exits_today)} helper="Total del día" />
         <KpiCard title="Estado cámaras" value={`${data.online_cameras}/${data.total_cameras}`} helper={`${Math.round((data.online_ratio || 0) * 100)}% online`} />
       </div>
+
+      <article className="panel">
+        <div className="panel-header">
+          <h3>Entradas/Salidas por género aparente</h3>
+          <p>Estimación visual por rostro; si no hay señal suficiente se clasifica como “Sin clasificar”.</p>
+        </div>
+        <div className="kpi-grid">
+          <KpiCard title={genderTitle("entry", "male")} value={formatNumber(entriesByGender.male || 0)} />
+          <KpiCard title={genderTitle("entry", "female")} value={formatNumber(entriesByGender.female || 0)} />
+          <KpiCard title={genderTitle("entry", "unknown")} value={formatNumber(entriesByGender.unknown || 0)} />
+          <KpiCard title={genderTitle("exit", "male")} value={formatNumber(exitsByGender.male || 0)} />
+          <KpiCard title={genderTitle("exit", "female")} value={formatNumber(exitsByGender.female || 0)} />
+          <KpiCard title={genderTitle("exit", "unknown")} value={formatNumber(exitsByGender.unknown || 0)} />
+        </div>
+      </article>
 
       <article className="panel flow-panel">
         <div className="panel-header">
