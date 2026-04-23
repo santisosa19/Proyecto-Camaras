@@ -1,5 +1,5 @@
 """
-Módulo de detección de personas con YOLOv8
+Módulo de detección de personas con YOLO.
 """
 import logging
 from typing import List, Dict, Optional, Tuple
@@ -69,7 +69,7 @@ class Detection:
 
 class PersonDetector:
     """
-    Detector de personas basado en YOLOv8
+    Detector de personas basado en YOLO.
     """
     
     def __init__(

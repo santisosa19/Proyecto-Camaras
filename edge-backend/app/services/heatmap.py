@@ -30,6 +30,7 @@ class OccupancyHeatmap:
         blur_kernel: int = 21,
         decay_per_second: float = 0.0,
         min_nonzero_intensity: int = 0,
+        monotonic_render: bool = False,
         output_dir: str = "heatmaps",
         metadata: Optional[Dict] = None,
     ):
@@ -41,10 +42,12 @@ class OccupancyHeatmap:
             self.blur_kernel += 1
         self.decay_per_second = max(0.0, float(decay_per_second))
         self.min_nonzero_intensity = int(np.clip(int(min_nonzero_intensity), 0, 255))
+        self.monotonic_render = bool(monotonic_render)
         self.output_dir = Path(output_dir)
         self.metadata = metadata or {}
 
         self.grid: Optional[np.ndarray] = None
+        self._peak_render_u8: Optional[np.ndarray] = None
         self.grid_h = 0
         self.grid_w = 0
         self.frame_w = 0
@@ -84,6 +87,7 @@ class OccupancyHeatmap:
     def reset(self):
         if self.grid is not None:
             self.grid.fill(0.0)
+        self._peak_render_u8 = None
         self.total_samples = 0
         self.total_weight = 0.0
         self.last_update_ts = None
@@ -151,7 +155,15 @@ class OccupancyHeatmap:
             min_norm = self.min_nonzero_intensity / 255.0
             positive_mask = heat > 0
             norm[positive_mask] = np.maximum(norm[positive_mask], min_norm)
-        return (norm * 255).astype(np.uint8)
+        heat_u8 = (norm * 255).astype(np.uint8)
+        if not self.monotonic_render:
+            return heat_u8
+
+        if self._peak_render_u8 is None or self._peak_render_u8.shape != heat_u8.shape:
+            self._peak_render_u8 = heat_u8.copy()
+        else:
+            self._peak_render_u8 = np.maximum(self._peak_render_u8, heat_u8)
+        return self._peak_render_u8
 
     def render_overlay(self, frame: np.ndarray) -> np.ndarray:
         if self.grid is None:

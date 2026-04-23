@@ -35,7 +35,7 @@ Para mejorar estabilidad de boxes cuando una persona está quieta o parcialmente
 ```bash
 YOLO_MODEL_PATH=yolov8n.pt
 YOLO_DEVICE=auto
-YOLO_CONFIDENCE=0.22
+YOLO_CONFIDENCE=0.45
 YOLO_IOU=0.60
 YOLO_IMAGE_SIZE=1280
 YOLO_TRACKER=trackers/bytetrack_stable.yaml

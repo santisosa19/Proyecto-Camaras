@@ -438,6 +438,9 @@ class TrafficAnalysisSystem:
         self.current_heatmap_hour_start: datetime | None = None
         self.gender_estimator: ApparentGenderEstimator | None = None
         self.latest_track_gender: dict[int, dict] = {}
+        self.require_tracked_detections = (
+            os.getenv("DETECTIONS_REQUIRE_TRACK_ID", "true").lower() == "true"
+        )
 
         # Configuración de mapa de calor
         self.heatmap_enabled = os.getenv("HEATMAP_ENABLED", "true").lower() == "true"
@@ -481,6 +484,18 @@ class TrafficAnalysisSystem:
         
         # Inicializar componentes
         self._init_components()
+
+    def _filter_detections(self, detections):
+        """
+        Filtra detecciones ruidosas.
+        Por defecto solo conserva detecciones con track_id para evitar falsos
+        positivos instantáneos (ghost boxes) que no llegan a trackearse.
+        """
+        if not detections:
+            return detections
+        if not self.require_tracked_detections:
+            return detections
+        return [det for det in detections if det.track_id is not None]
     
     def _init_components(self):
         """Inicializar todos los componentes"""
@@ -516,9 +531,9 @@ class TrafficAnalysisSystem:
             logger.info("✓ Cámara conectada")
             
             # 2. Detector YOLO
-            logger.info("Cargando detector YOLOv8...")
+            logger.info("Cargando detector YOLO...")
             yolo_model_path = os.getenv("YOLO_MODEL_PATH", "yolov8n.pt").strip() or "yolov8n.pt"
-            yolo_confidence = float(os.getenv("YOLO_CONFIDENCE", "0.22"))
+            yolo_confidence = float(os.getenv("YOLO_CONFIDENCE", "0.45"))
             yolo_iou = float(os.getenv("YOLO_IOU", "0.60"))
             yolo_image_size = int(os.getenv("YOLO_IMAGE_SIZE", "1280"))
             yolo_max_det = int(os.getenv("YOLO_MAX_DETECTIONS", "120"))
@@ -664,6 +679,7 @@ class TrafficAnalysisSystem:
                     blur_kernel=heatmap_blur_kernel,
                     decay_per_second=0.0,
                     min_nonzero_intensity=self.hourly_heatmap_min_nonzero_intensity,
+                    monotonic_render=True,
                     output_dir=hourly_dir,
                     metadata={
                         "camera_name": self.camera_name,
@@ -711,6 +727,7 @@ class TrafficAnalysisSystem:
                 
                 # Detectar personas (con tracking)
                 detections = self.detector.detect(frame, track=True)
+                detections = self._filter_detections(detections)
                 now_ts = time.time()
                 now_dt = datetime.utcnow()
                 if self.gender_estimator is not None and self.gender_estimator.enabled:
@@ -1225,7 +1242,7 @@ def main():
         'camera_id': 'camara_prueba_marathon',
         'camera_name': 'Cámara de Prueba Marathon',
         'rtsp_url': os.getenv('CAMERA_RTSP_URL', '').strip(),
-        'entry_direction': 'positive',  # positive = entra, negative = sale
+        'entry_direction': 'negative',  # positive = entra, negative = sale
         'show_window': os.getenv('SHOW_WINDOW', 'false').lower() == 'true',
         'save_to_db': os.getenv('SAVE_TO_DB', 'false').lower() == 'true',
         'save_to_api': os.getenv('SAVE_TO_API', 'false').lower() == 'true',

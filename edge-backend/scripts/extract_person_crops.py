@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Extrae crops de personas desde RTSP o archivo de video usando YOLOv8.
+Extrae crops de personas desde RTSP o archivo de video usando YOLO.
 """
 import argparse
 import hashlib
@@ -118,4 +118,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
