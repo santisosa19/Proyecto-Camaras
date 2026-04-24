@@ -41,7 +41,6 @@ from app.services.detector import PersonDetector
 from app.services.counter import PersonCounter
 from app.services.heatmap import OccupancyHeatmap
 from app.services.apparent_gender import ApparentGenderEstimator
-from app.services.employee_classifier import TrackEmployeeFilter
 
 
 # Archivo de configuración de líneas
@@ -65,13 +64,6 @@ def sanitize_rtsp_url(url: str) -> str:
         host = f"{host}:{parts.port}"
     netloc = f"{auth}@{host}"
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
-
-
-def env_bool(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 class LineConfigurator:
@@ -413,8 +405,6 @@ class TrafficAnalysisSystem:
         max_ingest_queue_size: int = 10000,
         branch_id: str = "",
         branch_name: str = "",
-        detection_snapshot_interval_seconds: float | None = None,
-        pilot_mode: bool = False,
     ):
         """
         Args:
@@ -442,28 +432,15 @@ class TrafficAnalysisSystem:
         self.max_ingest_queue_size = max(1, int(max_ingest_queue_size))
         self.branch_id = branch_id.strip()
         self.branch_name = branch_name.strip()
-        self.pilot_mode = bool(pilot_mode)
-
-        if detection_snapshot_interval_seconds is None:
-            detection_snapshot_interval_seconds = 8.0 if self.pilot_mode else 4.0
-        self.detection_snapshot_interval_seconds = max(
-            1.0,
-            float(detection_snapshot_interval_seconds),
-        )
-        self.last_detection_snapshot = 0.0
-
         self.remote_ingest: RemoteIngestClient | None = None
         self.heatmap: OccupancyHeatmap | None = None
         self.hourly_heatmap: OccupancyHeatmap | None = None
         self.current_heatmap_hour_start: datetime | None = None
         self.gender_estimator: ApparentGenderEstimator | None = None
         self.latest_track_gender: dict[int, dict] = {}
-        self.employee_filter: TrackEmployeeFilter | None = None
-        self.latest_track_employee: dict[int, dict] = {}
 
         # Configuración de mapa de calor
-        heatmap_default = "false" if self.pilot_mode else "true"
-        self.heatmap_enabled = os.getenv("HEATMAP_ENABLED", heatmap_default).lower() == "true"
+        self.heatmap_enabled = os.getenv("HEATMAP_ENABLED", "true").lower() == "true"
         self.show_heatmap_overlay = os.getenv("SHOW_HEATMAP_OVERLAY", "true").lower() == "true"
         self.save_heatmap_snapshots = os.getenv("SAVE_HEATMAP_SNAPSHOTS", "true").lower() == "true"
         self.heatmap_keep_history = os.getenv("HEATMAP_KEEP_HISTORY", "false").lower() == "true"
@@ -476,10 +453,6 @@ class TrafficAnalysisSystem:
         self.hourly_heatmap_partial_flush_seconds = max(
             15.0,
             float(os.getenv("HOURLY_HEATMAP_PARTIAL_FLUSH_SECONDS", "60")),
-        )
-        self.hourly_heatmap_min_nonzero_intensity = max(
-            0,
-            min(80, int(os.getenv("HOURLY_HEATMAP_MIN_NONZERO_INTENSITY", "12"))),
         )
         self.last_hourly_heatmap_partial_flush = 0.0
 
@@ -603,11 +576,6 @@ class TrafficAnalysisSystem:
             logger.info(f"Dirección de entrada configurada: {self.entry_direction}")
             
             logger.info("✓ Contador configurado")
-            logger.info(
-                "Modo piloto: %s | interval snapshot detección: %.1fs",
-                self.pilot_mode,
-                self.detection_snapshot_interval_seconds,
-            )
 
             apparent_gender_enabled = os.getenv("APPARENT_GENDER_ENABLED", "false").lower() == "true"
             gender_model_dir = os.getenv("GENDER_MODEL_DIR", "models/gender").strip() or "models/gender"
@@ -619,23 +587,6 @@ class TrafficAnalysisSystem:
                 gender_model_prototxt = str(Path(__file__).parent / gender_model_prototxt)
             if gender_model_weights and not os.path.isabs(gender_model_weights):
                 gender_model_weights = str(Path(__file__).parent / gender_model_weights)
-            gender_sample_every_n_frames = int(os.getenv("GENDER_SAMPLE_EVERY_N_FRAMES", "10"))
-            gender_vote_window = int(os.getenv("GENDER_VOTE_WINDOW", "12"))
-            gender_min_votes = int(os.getenv("GENDER_MIN_VOTES", "5"))
-            gender_confidence_threshold = float(os.getenv("GENDER_CONFIDENCE_THRESHOLD", "0.64"))
-            gender_aggregate_confidence_threshold = float(
-                os.getenv("GENDER_AGGREGATE_CONFIDENCE_THRESHOLD", "0.67")
-            )
-            gender_female_confidence_threshold = float(
-                os.getenv("GENDER_FEMALE_CONFIDENCE_THRESHOLD", "0.78")
-            )
-            gender_lock_confidence_threshold = float(
-                os.getenv("GENDER_LOCK_CONFIDENCE_THRESHOLD", "0.72")
-            )
-            gender_lock_min_votes = int(os.getenv("GENDER_LOCK_MIN_VOTES", "6"))
-            gender_flip_margin = float(os.getenv("GENDER_FLIP_MARGIN", "0.18"))
-            gender_flip_min_votes = int(os.getenv("GENDER_FLIP_MIN_VOTES", "6"))
-            gender_stale_track_seconds = float(os.getenv("GENDER_STALE_TRACK_SECONDS", "25"))
 
             self.gender_estimator = ApparentGenderEstimator(
                 enabled=apparent_gender_enabled,
@@ -643,52 +594,16 @@ class TrafficAnalysisSystem:
                 model_weights_path=gender_model_weights,
                 model_dir=gender_model_dir,
                 auto_download=os.getenv("GENDER_AUTO_DOWNLOAD_MODEL", "true").lower() == "true",
-                sample_every_n_frames=gender_sample_every_n_frames,
-                vote_window=gender_vote_window,
-                min_votes=gender_min_votes,
-                confidence_threshold=gender_confidence_threshold,
-                aggregate_confidence_threshold=gender_aggregate_confidence_threshold,
-                female_confidence_threshold=gender_female_confidence_threshold,
-                lock_confidence_threshold=gender_lock_confidence_threshold,
-                lock_min_votes=gender_lock_min_votes,
-                flip_margin=gender_flip_margin,
-                flip_min_votes=gender_flip_min_votes,
-                stale_track_seconds=gender_stale_track_seconds,
+                sample_every_n_frames=int(os.getenv("GENDER_SAMPLE_EVERY_N_FRAMES", "10")),
+                vote_window=int(os.getenv("GENDER_VOTE_WINDOW", "12")),
+                min_votes=int(os.getenv("GENDER_MIN_VOTES", "4")),
+                confidence_threshold=float(os.getenv("GENDER_CONFIDENCE_THRESHOLD", "0.58")),
+                stale_track_seconds=float(os.getenv("GENDER_STALE_TRACK_SECONDS", "25")),
             )
             if self.gender_estimator.enabled:
                 logger.info("✓ Género aparente habilitado")
             else:
                 logger.info("Género aparente deshabilitado")
-
-            employee_filter_enabled = env_bool("EMPLOYEE_FILTER_ENABLED", default=False)
-            employee_model_path = os.getenv("EMPLOYEE_MODEL_PATH", "").strip()
-            if employee_model_path and not os.path.isabs(employee_model_path):
-                employee_model_path = str(Path(__file__).parent / employee_model_path)
-            employee_device = os.getenv("EMPLOYEE_DEVICE", "cpu").strip() or "cpu"
-            employee_threshold = float(os.getenv("EMPLOYEE_THRESHOLD", "0.75"))
-            employee_vote_window = int(os.getenv("EMPLOYEE_VOTE_WINDOW", "8"))
-            employee_min_votes = int(os.getenv("EMPLOYEE_MIN_VOTES", "5"))
-
-            self.employee_filter = TrackEmployeeFilter(
-                model_path=employee_model_path if employee_filter_enabled else "",
-                device=employee_device,
-                employee_threshold=employee_threshold,
-                vote_window=employee_vote_window,
-                min_votes=employee_min_votes,
-            )
-            if self.employee_filter.enabled:
-                logger.info(
-                    "✓ Filtro de empleados habilitado (threshold=%.2f, vote_window=%s, min_votes=%s)",
-                    employee_threshold,
-                    employee_vote_window,
-                    employee_min_votes,
-                )
-            elif employee_filter_enabled:
-                logger.warning(
-                    "EMPLOYEE_FILTER_ENABLED=true, pero el filtro quedó deshabilitado. Revisá EMPLOYEE_MODEL_PATH."
-                )
-            else:
-                logger.info("Filtro de empleados deshabilitado")
 
             if self.heatmap_enabled:
                 heatmap_output_dir = (
@@ -721,7 +636,6 @@ class TrafficAnalysisSystem:
                     overlay_alpha=heatmap_overlay_alpha,
                     blur_kernel=heatmap_blur_kernel,
                     decay_per_second=0.0,
-                    min_nonzero_intensity=self.hourly_heatmap_min_nonzero_intensity,
                     output_dir=hourly_dir,
                     metadata={
                         "camera_name": self.camera_name,
@@ -740,8 +654,6 @@ class TrafficAnalysisSystem:
                     self.send_hourly_heatmap_to_api,
                     self.hourly_heatmap_partial_flush_seconds,
                 )
-            else:
-                logger.info("Heatmap deshabilitado")
             
             logger.info("=" * 60)
             logger.info("SISTEMA LISTO")
@@ -781,19 +693,6 @@ class TrafficAnalysisSystem:
                         now_ts=now_ts,
                     )
                     self._apply_track_genders(detections, track_gender_states)
-
-                excluded_track_ids: set[int] = set()
-                if self.employee_filter is not None and self.employee_filter.enabled:
-                    track_employee_states = self.employee_filter.classify_tracks(
-                        frame=frame,
-                        detections=detections,
-                    )
-                    self._apply_track_employee_states(detections, track_employee_states)
-                    excluded_track_ids = {
-                        int(track_id)
-                        for track_id, state in track_employee_states.items()
-                        if state.is_employee
-                    }
 
                 if self.hourly_heatmap is not None and self.current_heatmap_hour_start is not None:
                     frame_hour_start = now_dt.replace(minute=0, second=0, microsecond=0)
@@ -835,10 +734,7 @@ class TrafficAnalysisSystem:
                         self.last_heatmap_background_update = now_ts
                 
                 # Actualizar contador
-                count_stats = self.counter.update(
-                    detections,
-                    excluded_track_ids=excluded_track_ids,
-                )
+                count_stats = self.counter.update(detections)
                 crossing_events = self.counter.pop_crossing_events()
                 
                 # Actualizar estadísticas
@@ -854,32 +750,26 @@ class TrafficAnalysisSystem:
                     # Dibujar bounding boxes
                     for det in detections:
                         x1, y1, x2, y2 = [int(x) for x in det.bbox]
-
-                        is_employee = bool(det.is_employee) if det.is_employee is not None else False
-                        box_color = (0, 165, 255) if is_employee else (0, 255, 0)
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
+                        
+                        # Box verde
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                         
                         # Label con ID y confianza
-                        if self.gender_estimator is None or not self.gender_estimator.enabled:
-                            gender_short = "OFF"
-                        elif det.apparent_gender == "male":
+                        gender_short = "?"
+                        if det.apparent_gender == "male":
                             gender_short = "M"
                         elif det.apparent_gender == "female":
                             gender_short = "F"
-                        else:
-                            gender_short = "U"
-
-                        employee_short = "E" if is_employee else "C"
                         track_label = det.track_id if det.track_id is not None else "-"
-                        label = f"ID:{track_label} G:{gender_short} T:{employee_short} {det.confidence:.2f}"
+                        label = f"ID:{track_label} G:{gender_short} {det.confidence:.2f}"
                         cv2.putText(
                             frame, label, (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2
                         )
                         
                         # Centroid
                         cx, cy = [int(x) for x in det.centroid]
-                        cv2.circle(frame, (cx, cy), 4, box_color, -1)
+                        cv2.circle(frame, (cx, cy), 4, (0, 255, 0), -1)
                     
                     # Dibujar líneas de conteo
                     frame = self.counter.draw_lines(frame)
@@ -891,8 +781,6 @@ class TrafficAnalysisSystem:
                         f"Detectados: {len(detections)}",
                         f"Tracks activos: {count_stats['active_tracks']}",
                     ]
-                    if self.employee_filter is not None and self.employee_filter.enabled:
-                        info_lines.append(f"Empleados excluidos: {len(excluded_track_ids)}")
                     
                     # Agregar conteos de todas las líneas
                     for line_name, line_stats in count_stats.get('lines', {}).items():
@@ -952,16 +840,13 @@ class TrafficAnalysisSystem:
                     if self.save_to_api:
                         self._queue_crossing_events(crossing_events)
 
-                if (
-                    now_ts - self.last_detection_snapshot
-                    >= self.detection_snapshot_interval_seconds
-                ):
+                # Guardar snapshots livianos en base de datos cada ~60 frames
+                if frame_count % 60 == 0:
                     if self.save_to_db:
                         logger.info(f"💾 Guardando DB: {len(detections)} personas")
                         self._save_to_database(detections)
                     if self.save_to_api:
                         self._queue_detection_snapshot(detections)
-                    self.last_detection_snapshot = now_ts
 
                 if (
                     self.heatmap is not None
@@ -1100,9 +985,10 @@ class TrafficAnalysisSystem:
         """Encolar snapshot periódico para ingesta remota."""
         if self.remote_ingest is None:
             return
+        if not detections:
+            return
 
         capture_stats = self.capture.get_stats()
-        uptime_seconds = max(1e-6, (time.time() - self.stats['start_time']))
         payload = {
             "camera_id": self.camera_id,
             "camera_name": self.camera_name,
@@ -1111,9 +997,9 @@ class TrafficAnalysisSystem:
             "branch_name": self.branch_name or None,
             "timestamp": datetime.utcnow().isoformat(),
             "person_count": len(detections),
-            "detections_data": [det.to_dict() for det in detections],
+            "detections_data": [det.to_dict() for det in detections] if detections else [],
             "is_connected": capture_stats.get('is_connected'),
-            "fps": self.stats['frames_processed'] / uptime_seconds,
+            "fps": self.stats['frames_processed'] / (time.time() - self.stats['start_time']),
             "total_frames": self.stats['frames_processed'],
             "error_count": capture_stats.get('error_count', 0),
         }
@@ -1137,35 +1023,12 @@ class TrafficAnalysisSystem:
                 "updated_at": datetime.utcnow().isoformat(),
             }
 
-    def _apply_track_employee_states(self, detections, track_employee_states):
-        """Aplicar clasificación employee/non_employee por track sobre detecciones del frame."""
-        for det in detections:
-            if det.track_id is None:
-                continue
-            track_id = int(det.track_id)
-            state = track_employee_states.get(track_id)
-            if state is None:
-                continue
-            det.is_employee = bool(state.is_employee)
-            det.employee_probability = float(state.employee_probability)
-            self.latest_track_employee[track_id] = {
-                "is_employee": bool(state.is_employee),
-                "employee_probability": float(state.employee_probability),
-                "updated_at": datetime.utcnow().isoformat(),
-            }
-
     def _build_crossing_event_metadata(self, event: dict) -> dict:
         """Construir metadata enriquecida para un evento de cruce."""
         metadata = {"position": event.get("position")}
         track_id = event.get("track_id")
         if track_id is None:
             return metadata
-
-        track_employee = self.latest_track_employee.get(int(track_id))
-        if track_employee:
-            metadata["is_employee"] = bool(track_employee.get("is_employee", False))
-            metadata["employee_probability"] = float(track_employee.get("employee_probability", 0.0))
-
         track_gender = self.latest_track_gender.get(int(track_id))
         if not track_gender:
             metadata["apparent_gender"] = "unknown"
@@ -1325,23 +1188,11 @@ class TrafficAnalysisSystem:
 
 def main():
     """Función principal"""
-
-    pilot_mode = env_bool("PILOT_MODE", default=False)
-    detection_snapshot_interval_seconds: float | None = None
-    detection_snapshot_interval_raw = os.getenv("DETECTION_SNAPSHOT_INTERVAL_SECONDS", "").strip()
-    if detection_snapshot_interval_raw:
-        try:
-            detection_snapshot_interval_seconds = float(detection_snapshot_interval_raw)
-        except ValueError:
-            logger.warning(
-                "DETECTION_SNAPSHOT_INTERVAL_SECONDS inválido (%s). Se usará el valor por defecto.",
-                detection_snapshot_interval_raw,
-            )
     
     # Configuración de la cámara
     CAMERA_CONFIG = {
-        'camera_id': os.getenv('CAMERA_ID', 'camara_prueba_marathon').strip() or 'camara_prueba_marathon',
-        'camera_name': os.getenv('CAMERA_NAME', 'Cámara de Prueba Marathon').strip() or 'Cámara de Prueba Marathon',
+        'camera_id': 'camara_prueba_marathon',
+        'camera_name': 'Cámara de Prueba Marathon',
         'rtsp_url': os.getenv('CAMERA_RTSP_URL', '').strip(),
         'entry_direction': 'positive',  # positive = entra, negative = sale
         'show_window': os.getenv('SHOW_WINDOW', 'false').lower() == 'true',
@@ -1352,8 +1203,6 @@ def main():
         'max_ingest_queue_size': int(os.getenv('MAX_INGEST_QUEUE_SIZE', '10000')),
         'branch_id': os.getenv('BRANCH_ID', ''),
         'branch_name': os.getenv('BRANCH_NAME', ''),
-        'detection_snapshot_interval_seconds': detection_snapshot_interval_seconds,
-        'pilot_mode': pilot_mode,
     }
 
     if not CAMERA_CONFIG['rtsp_url']:

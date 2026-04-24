@@ -12,7 +12,7 @@ import os
 logger = logging.getLogger(__name__)
 
 
-class VideoCapture  :
+class VideoCapture:
     """
     Captura de video desde fuente RTSP con reconexión automática
     """
@@ -60,7 +60,7 @@ class VideoCapture  :
         logger.info(f"VideoCapture inicializado para cámara {camera_id}")
 
     def _read_frame_with_timeout(self, timeout_seconds: float):
-        """Leer un frame con timeout para evitar bloqueosq indefinidos."""
+        """Leer un frame con timeout para evitar bloqueos indefinidos."""
         done = Event()
         result = {"ret": False, "frame": None, "error": None}
 

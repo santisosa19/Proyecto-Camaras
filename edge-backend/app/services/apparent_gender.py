@@ -4,7 +4,6 @@ Clasificador de género aparente basado en rostro con agregación por track.
 from __future__ import annotations
 
 import logging
-import ssl
 import time
 import urllib.request
 from collections import defaultdict, deque
@@ -54,12 +53,6 @@ class ApparentGenderEstimator:
         vote_window: int = 12,
         min_votes: int = 4,
         confidence_threshold: float = 0.58,
-        aggregate_confidence_threshold: float = 0.62,
-        female_confidence_threshold: float = 0.72,
-        lock_confidence_threshold: float = 0.62,
-        lock_min_votes: int = 5,
-        flip_margin: float = 0.12,
-        flip_min_votes: int = 5,
         stale_track_seconds: float = 25.0,
     ):
         self.enabled = bool(enabled)
@@ -69,16 +62,6 @@ class ApparentGenderEstimator:
         self.vote_window = max(3, int(vote_window))
         self.min_votes = max(1, int(min_votes))
         self.confidence_threshold = float(np.clip(confidence_threshold, 0.1, 0.95))
-        self.aggregate_confidence_threshold = float(
-            np.clip(aggregate_confidence_threshold, 0.5, 0.99)
-        )
-        self.female_confidence_threshold = float(
-            np.clip(max(self.confidence_threshold, female_confidence_threshold), 0.1, 0.99)
-        )
-        self.lock_confidence_threshold = float(np.clip(lock_confidence_threshold, 0.5, 0.99))
-        self.lock_min_votes = max(self.min_votes, int(lock_min_votes))
-        self.flip_margin = float(np.clip(flip_margin, 0.02, 0.5))
-        self.flip_min_votes = max(1, int(flip_min_votes))
         self.stale_track_seconds = max(5.0, float(stale_track_seconds))
 
         self.model_prototxt_path = (
@@ -97,7 +80,6 @@ class ApparentGenderEstimator:
         )
         self.gender_net: Optional[cv2.dnn.Net] = None
         self.track_votes: Dict[int, deque] = defaultdict(lambda: deque(maxlen=self.vote_window))
-        self.track_locked: Dict[int, TrackGenderState] = {}
         self.track_last_seen: Dict[int, float] = {}
 
         if not self.enabled:
@@ -118,15 +100,10 @@ class ApparentGenderEstimator:
                 str(self.model_weights_path),
             )
             logger.info(
-                (
-                    "✓ Género aparente habilitado "
-                    "(sample=%s, min_votes=%s, conf=%.2f, agg_conf=%.2f, female_conf=%.2f)"
-                ),
+                "✓ Género aparente habilitado (sample=%s, min_votes=%s, conf=%.2f)",
                 self.sample_every_n_frames,
                 self.min_votes,
                 self.confidence_threshold,
-                self.aggregate_confidence_threshold,
-                self.female_confidence_threshold,
             )
         except Exception as exc:
             logger.warning("No se pudo cargar modelo de género aparente: %s", exc)
@@ -145,55 +122,17 @@ class ApparentGenderEstimator:
             return False
 
         self.model_dir.mkdir(parents=True, exist_ok=True)
-        ssl_context = self._build_ssl_context()
         try:
             if not self.model_prototxt_path.exists():
                 logger.info("Descargando modelo de género (prototxt)...")
-                self._download_model_file(
-                    url=DEFAULT_GENDER_PROTOTXT_URL,
-                    destination=self.model_prototxt_path,
-                    ssl_context=ssl_context,
-                )
+                urllib.request.urlretrieve(DEFAULT_GENDER_PROTOTXT_URL, str(self.model_prototxt_path))
             if not self.model_weights_path.exists():
                 logger.info("Descargando modelo de género (weights)...")
-                self._download_model_file(
-                    url=DEFAULT_GENDER_WEIGHTS_URL,
-                    destination=self.model_weights_path,
-                    ssl_context=ssl_context,
-                )
+                urllib.request.urlretrieve(DEFAULT_GENDER_WEIGHTS_URL, str(self.model_weights_path))
             return True
         except Exception as exc:
-            logger.warning(
-                "Descarga de modelos de género falló; se desactiva estimador. Error: %s",
-                exc,
-            )
+            logger.warning("No se pudieron descargar modelos de género: %s", exc)
             return False
-
-    def _build_ssl_context(self) -> ssl.SSLContext:
-        try:
-            import certifi  # type: ignore
-
-            return ssl.create_default_context(cafile=certifi.where())
-        except Exception:
-            return ssl.create_default_context()
-
-    def _download_model_file(
-        self,
-        url: str,
-        destination: Path,
-        ssl_context: ssl.SSLContext,
-    ) -> None:
-        request = urllib.request.Request(
-            url,
-            headers={"User-Agent": "traffic-analysis-system/edge-backend"},
-        )
-        with urllib.request.urlopen(request, context=ssl_context, timeout=60) as response:
-            with open(destination, "wb") as output_file:
-                while True:
-                    chunk = response.read(8192)
-                    if not chunk:
-                        break
-                    output_file.write(chunk)
 
     def _extract_best_face(self, person_crop: np.ndarray) -> Optional[np.ndarray]:
         if person_crop is None or person_crop.size == 0:
@@ -240,113 +179,35 @@ class ApparentGenderEstimator:
 
         if confidence < self.confidence_threshold:
             return "unknown", confidence
-        if label == "female" and confidence < self.female_confidence_threshold:
-            return "unknown", confidence
         return label, confidence
 
     def _aggregate_track_state(self, track_id: int) -> TrackGenderState:
         history = self.track_votes.get(track_id)
         if not history:
-            return self._stabilize_track_state(
-                track_id,
-                current_state=TrackGenderState(),
-                label_votes={"male": 0, "female": 0},
-            )
+            return TrackGenderState()
 
         weights = {"male": 0.0, "female": 0.0, "unknown": 0.0}
-        label_votes = {"male": 0, "female": 0}
         for label, confidence in history:
             safe_label = label if label in weights else "unknown"
             if safe_label == "unknown":
                 weights[safe_label] += 0.12
             else:
                 weights[safe_label] += max(0.05, float(confidence))
-                label_votes[safe_label] += 1
 
         votes = len(history)
         if votes < self.min_votes:
-            return self._stabilize_track_state(
-                track_id,
-                current_state=TrackGenderState(label="unknown", confidence=0.0, votes=votes),
-                label_votes=label_votes,
-            )
+            return TrackGenderState(label="unknown", confidence=0.0, votes=votes)
 
         gender_total = weights["male"] + weights["female"]
         if gender_total <= 1e-6:
-            return self._stabilize_track_state(
-                track_id,
-                current_state=TrackGenderState(label="unknown", confidence=0.0, votes=votes),
-                label_votes=label_votes,
-            )
+            return TrackGenderState(label="unknown", confidence=0.0, votes=votes)
 
         label = "male" if weights["male"] >= weights["female"] else "female"
         confidence = float(max(weights["male"], weights["female"]) / gender_total)
-        if confidence < self.aggregate_confidence_threshold:
-            return self._stabilize_track_state(
-                track_id,
-                current_state=TrackGenderState(label="unknown", confidence=confidence, votes=votes),
-                label_votes=label_votes,
-            )
+        if confidence < 0.55:
+            return TrackGenderState(label="unknown", confidence=confidence, votes=votes)
 
-        return self._stabilize_track_state(
-            track_id,
-            current_state=TrackGenderState(label=label, confidence=confidence, votes=votes),
-            label_votes=label_votes,
-        )
-
-    def _stabilize_track_state(
-        self,
-        track_id: int,
-        current_state: TrackGenderState,
-        label_votes: Dict[str, int],
-    ) -> TrackGenderState:
-        locked_state = self.track_locked.get(track_id)
-
-        if current_state.label in ("male", "female"):
-            can_lock_current = (
-                current_state.confidence >= self.lock_confidence_threshold
-                and current_state.votes >= self.lock_min_votes
-            )
-
-            if locked_state is None:
-                if can_lock_current:
-                    self.track_locked[track_id] = TrackGenderState(
-                        label=current_state.label,
-                        confidence=current_state.confidence,
-                        votes=current_state.votes,
-                    )
-                return current_state
-
-            if current_state.label == locked_state.label:
-                if can_lock_current:
-                    self.track_locked[track_id] = TrackGenderState(
-                        label=current_state.label,
-                        confidence=current_state.confidence,
-                        votes=current_state.votes,
-                    )
-                return current_state
-
-            # Histéresis: solo permitir flip con margen y votos acumulados suficientes.
-            contender_votes = int(label_votes.get(current_state.label, 0))
-            can_flip = (
-                contender_votes >= self.flip_min_votes
-                and (current_state.confidence - locked_state.confidence) >= self.flip_margin
-            )
-            if can_flip:
-                self.track_locked[track_id] = TrackGenderState(
-                    label=current_state.label,
-                    confidence=current_state.confidence,
-                    votes=current_state.votes,
-                )
-                return current_state
-
-        if locked_state is not None:
-            return TrackGenderState(
-                label=locked_state.label,
-                confidence=locked_state.confidence,
-                votes=current_state.votes,
-            )
-        return current_state
+        return TrackGenderState(label=label, confidence=confidence, votes=votes)
 
     def _evict_stale_tracks(self, now_ts: float):
         stale_ids = [
@@ -357,7 +218,6 @@ class ApparentGenderEstimator:
         for track_id in stale_ids:
             self.track_last_seen.pop(track_id, None)
             self.track_votes.pop(track_id, None)
-            self.track_locked.pop(track_id, None)
 
     def classify_tracks(
         self,
@@ -405,3 +265,4 @@ class ApparentGenderEstimator:
 
         self._evict_stale_tracks(ts)
         return results
+

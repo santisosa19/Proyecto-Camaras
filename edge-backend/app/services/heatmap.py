@@ -29,7 +29,6 @@ class OccupancyHeatmap:
         overlay_alpha: float = 0.35,
         blur_kernel: int = 21,
         decay_per_second: float = 0.0,
-        min_nonzero_intensity: int = 0,
         output_dir: str = "heatmaps",
         metadata: Optional[Dict] = None,
     ):
@@ -40,7 +39,6 @@ class OccupancyHeatmap:
         if self.blur_kernel % 2 == 0:
             self.blur_kernel += 1
         self.decay_per_second = max(0.0, float(decay_per_second))
-        self.min_nonzero_intensity = int(np.clip(int(min_nonzero_intensity), 0, 255))
         self.output_dir = Path(output_dir)
         self.metadata = metadata or {}
 
@@ -147,10 +145,6 @@ class OccupancyHeatmap:
             return None
 
         norm = np.clip(heat / high, 0.0, 1.0)
-        if self.min_nonzero_intensity > 0:
-            min_norm = self.min_nonzero_intensity / 255.0
-            positive_mask = heat > 0
-            norm[positive_mask] = np.maximum(norm[positive_mask], min_norm)
         return (norm * 255).astype(np.uint8)
 
     def render_overlay(self, frame: np.ndarray) -> np.ndarray:
@@ -199,10 +193,6 @@ class OccupancyHeatmap:
 
         colored = cv2.applyColorMap(heat_u8, cv2.COLORMAP_JET)  # BGR
         alpha = np.clip((heat_u8.astype(np.float32) / 255.0) * 220.0, 0, 255).astype(np.uint8)
-        if self.min_nonzero_intensity > 0:
-            positive_mask = heat_u8 > 0
-            alpha_floor = np.uint8(np.clip(self.min_nonzero_intensity, 0, 255))
-            alpha[positive_mask] = np.maximum(alpha[positive_mask], alpha_floor)
         bgra = np.dstack((colored, alpha))
         ok, encoded = cv2.imencode(".png", bgra)
         if not ok:
