@@ -66,6 +66,13 @@ def sanitize_rtsp_url(url: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class LineConfigurator:
     """Configurador interactivo de líneas de conteo"""
     
@@ -405,6 +412,8 @@ class TrafficAnalysisSystem:
         max_ingest_queue_size: int = 10000,
         branch_id: str = "",
         branch_name: str = "",
+        detection_snapshot_interval_seconds: float | None = None,
+        pilot_mode: bool = False,
     ):
         """
         Args:
@@ -432,6 +441,16 @@ class TrafficAnalysisSystem:
         self.max_ingest_queue_size = max(1, int(max_ingest_queue_size))
         self.branch_id = branch_id.strip()
         self.branch_name = branch_name.strip()
+        self.pilot_mode = bool(pilot_mode)
+
+        if detection_snapshot_interval_seconds is None:
+            detection_snapshot_interval_seconds = 8.0 if self.pilot_mode else 4.0
+        self.detection_snapshot_interval_seconds = max(
+            1.0,
+            float(detection_snapshot_interval_seconds),
+        )
+        self.last_detection_snapshot = 0.0
+
         self.remote_ingest: RemoteIngestClient | None = None
         self.heatmap: OccupancyHeatmap | None = None
         self.hourly_heatmap: OccupancyHeatmap | None = None
@@ -440,7 +459,8 @@ class TrafficAnalysisSystem:
         self.latest_track_gender: dict[int, dict] = {}
 
         # Configuración de mapa de calor
-        self.heatmap_enabled = os.getenv("HEATMAP_ENABLED", "true").lower() == "true"
+        heatmap_default = "false" if self.pilot_mode else "true"
+        self.heatmap_enabled = os.getenv("HEATMAP_ENABLED", heatmap_default).lower() == "true"
         self.show_heatmap_overlay = os.getenv("SHOW_HEATMAP_OVERLAY", "true").lower() == "true"
         self.save_heatmap_snapshots = os.getenv("SAVE_HEATMAP_SNAPSHOTS", "true").lower() == "true"
         self.heatmap_keep_history = os.getenv("HEATMAP_KEEP_HISTORY", "false").lower() == "true"
@@ -580,6 +600,11 @@ class TrafficAnalysisSystem:
             logger.info(f"Dirección de entrada configurada: {self.entry_direction}")
             
             logger.info("✓ Contador configurado")
+            logger.info(
+                "Modo piloto: %s | interval snapshot detección: %.1fs",
+                self.pilot_mode,
+                self.detection_snapshot_interval_seconds,
+            )
 
             apparent_gender_enabled = os.getenv("APPARENT_GENDER_ENABLED", "false").lower() == "true"
             gender_model_dir = os.getenv("GENDER_MODEL_DIR", "models/gender").strip() or "models/gender"
@@ -682,6 +707,8 @@ class TrafficAnalysisSystem:
                     self.send_hourly_heatmap_to_api,
                     self.hourly_heatmap_partial_flush_seconds,
                 )
+            else:
+                logger.info("Heatmap deshabilitado")
             
             logger.info("=" * 60)
             logger.info("SISTEMA LISTO")
@@ -871,13 +898,16 @@ class TrafficAnalysisSystem:
                     if self.save_to_api:
                         self._queue_crossing_events(crossing_events)
 
-                # Guardar snapshots livianos en base de datos cada ~60 frames
-                if frame_count % 60 == 0:
+                if (
+                    now_ts - self.last_detection_snapshot
+                    >= self.detection_snapshot_interval_seconds
+                ):
                     if self.save_to_db:
                         logger.info(f"💾 Guardando DB: {len(detections)} personas")
                         self._save_to_database(detections)
                     if self.save_to_api:
                         self._queue_detection_snapshot(detections)
+                    self.last_detection_snapshot = now_ts
 
                 if (
                     self.heatmap is not None
@@ -1016,10 +1046,9 @@ class TrafficAnalysisSystem:
         """Encolar snapshot periódico para ingesta remota."""
         if self.remote_ingest is None:
             return
-        if not detections:
-            return
 
         capture_stats = self.capture.get_stats()
+        uptime_seconds = max(1e-6, (time.time() - self.stats['start_time']))
         payload = {
             "camera_id": self.camera_id,
             "camera_name": self.camera_name,
@@ -1028,9 +1057,9 @@ class TrafficAnalysisSystem:
             "branch_name": self.branch_name or None,
             "timestamp": datetime.utcnow().isoformat(),
             "person_count": len(detections),
-            "detections_data": [det.to_dict() for det in detections] if detections else [],
+            "detections_data": [det.to_dict() for det in detections],
             "is_connected": capture_stats.get('is_connected'),
-            "fps": self.stats['frames_processed'] / (time.time() - self.stats['start_time']),
+            "fps": self.stats['frames_processed'] / uptime_seconds,
             "total_frames": self.stats['frames_processed'],
             "error_count": capture_stats.get('error_count', 0),
         }
@@ -1219,11 +1248,23 @@ class TrafficAnalysisSystem:
 
 def main():
     """Función principal"""
+
+    pilot_mode = env_bool("PILOT_MODE", default=False)
+    detection_snapshot_interval_seconds: float | None = None
+    detection_snapshot_interval_raw = os.getenv("DETECTION_SNAPSHOT_INTERVAL_SECONDS", "").strip()
+    if detection_snapshot_interval_raw:
+        try:
+            detection_snapshot_interval_seconds = float(detection_snapshot_interval_raw)
+        except ValueError:
+            logger.warning(
+                "DETECTION_SNAPSHOT_INTERVAL_SECONDS inválido (%s). Se usará el valor por defecto.",
+                detection_snapshot_interval_raw,
+            )
     
     # Configuración de la cámara
     CAMERA_CONFIG = {
-        'camera_id': 'camara_prueba_marathon',
-        'camera_name': 'Cámara de Prueba Marathon',
+        'camera_id': os.getenv('CAMERA_ID', 'camara_prueba_marathon').strip() or 'camara_prueba_marathon',
+        'camera_name': os.getenv('CAMERA_NAME', 'Cámara de Prueba Marathon').strip() or 'Cámara de Prueba Marathon',
         'rtsp_url': os.getenv('CAMERA_RTSP_URL', '').strip(),
         'entry_direction': 'positive',  # positive = entra, negative = sale
         'show_window': os.getenv('SHOW_WINDOW', 'false').lower() == 'true',
@@ -1234,6 +1275,8 @@ def main():
         'max_ingest_queue_size': int(os.getenv('MAX_INGEST_QUEUE_SIZE', '10000')),
         'branch_id': os.getenv('BRANCH_ID', ''),
         'branch_name': os.getenv('BRANCH_NAME', ''),
+        'detection_snapshot_interval_seconds': detection_snapshot_interval_seconds,
+        'pilot_mode': pilot_mode,
     }
 
     if not CAMERA_CONFIG['rtsp_url']:

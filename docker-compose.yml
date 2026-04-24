@@ -167,6 +167,8 @@ services:
       dockerfile: Dockerfile
     container_name: traffic_edge_backend
     environment:
+      CAMERA_ID: ${CAMERA_ID:-camara_prueba_marathon}
+      CAMERA_NAME: ${CAMERA_NAME:-Camara de Prueba Marathon}
       CAMERA_RTSP_URL: ${CAMERA_RTSP_URL:-}
       SAVE_TO_DB: ${SAVE_TO_DB:-false}
       SAVE_TO_API: ${SAVE_TO_API:-true}
@@ -174,6 +176,8 @@ services:
       REMOTE_API_KEY: ${REMOTE_API_KEY:-}
       BRANCH_ID: ${BRANCH_ID:-default_branch}
       BRANCH_NAME: ${BRANCH_NAME:-Default Branch}
+      PILOT_MODE: ${PILOT_MODE:-false}
+      DETECTION_SNAPSHOT_INTERVAL_SECONDS: ${DETECTION_SNAPSHOT_INTERVAL_SECONDS:-}
       SHOW_WINDOW: ${SHOW_WINDOW:-false}
       MAX_INGEST_QUEUE_SIZE: ${MAX_INGEST_QUEUE_SIZE:-10000}
       APPARENT_GENDER_ENABLED: ${APPARENT_GENDER_ENABLED:-true}

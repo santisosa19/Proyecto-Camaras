@@ -27,6 +27,7 @@ cp .env.example .env
 - `JWT_SECRET_KEY`
 - `INGEST_API_KEY`
 - `ADMIN_API_KEY`
+- `CAMERA_ID` y `CAMERA_NAME` (si vas a levantar edge)
 - `CAMERA_RTSP_URL` (si vas a levantar edge)
 
 ## Ejecución con Docker

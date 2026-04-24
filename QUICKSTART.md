@@ -14,6 +14,7 @@ Editá `.env` y definí al menos:
 
 Si vas a correr edge:
 
+- `CAMERA_ID` y `CAMERA_NAME`
 - `CAMERA_RTSP_URL`
 
 ## 2) Levantar backend central

@@ -54,7 +54,7 @@ class DetectionSnapshotItem(BaseModel):
     branch_id: str | None = None
     branch_name: str | None = None
     timestamp: datetime | None = None
-    person_count: int = 0
+    person_count: int = Field(default=0, ge=0)
     detections_data: list[dict[str, Any]] = Field(default_factory=list)
     is_connected: bool | None = None
     fps: float | None = None
@@ -126,36 +126,27 @@ async def ingest_detections(
 
     try:
         detection_rows: list[Detection] = []
-        latest_by_camera: dict[str, DetectionSnapshotItem] = {}
+        latest_by_camera: dict[str, tuple[DetectionSnapshotItem, datetime]] = {}
 
         for item in payload.items:
-            if item.person_count <= 0:
-                continue
             ts = item.timestamp or datetime.utcnow()
             detection_rows.append(
                 Detection(
                     camera_id=item.camera_id,
                     timestamp=ts,
-                    person_count=item.person_count,
+                    person_count=max(0, int(item.person_count)),
                     detections_data=item.detections_data,
                 )
             )
 
             prev = latest_by_camera.get(item.camera_id)
-            if prev is None:
-                latest_by_camera[item.camera_id] = item
-            else:
-                prev_ts = prev.timestamp or datetime.min
-                if ts >= prev_ts:
-                    latest_by_camera[item.camera_id] = item
-
-        if not detection_rows:
-            return {"inserted": 0, "updated_cameras": 0}
+            if prev is None or ts >= prev[1]:
+                latest_by_camera[item.camera_id] = (item, ts)
 
         db.add_all(detection_rows)
 
         updated_cameras = 0
-        for camera_id, item in latest_by_camera.items():
+        for camera_id, (item, effective_ts) in latest_by_camera.items():
             status_row = db.query(CameraStatus).filter(
                 CameraStatus.camera_id == camera_id
             ).first()
@@ -183,7 +174,7 @@ async def ingest_detections(
                 existing_meta["branch_name"] = item.branch_name
             if existing_meta:
                 status_row.camera_metadata = existing_meta
-            status_row.last_frame_at = item.timestamp or datetime.utcnow()
+            status_row.last_frame_at = effective_ts
             status_row.updated_at = datetime.utcnow()
             status_row.is_active = True
             updated_cameras += 1

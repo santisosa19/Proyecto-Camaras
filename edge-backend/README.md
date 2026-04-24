@@ -13,10 +13,19 @@ cp .env.example .env
 2. Completar variables mínimas en `.env`:
 
 ```bash
+CAMERA_ID=camara_local_001
+CAMERA_NAME=Ingreso Local 001
 CAMERA_RTSP_URL=rtsp://user:pass@ip_dvr:554/Streaming/Channels/101
 SAVE_TO_API=true
 REMOTE_API_BASE_URL=http://ip-servidor-central:8000
 REMOTE_API_KEY=tu_ingest_api_key
+```
+
+Para piloto (1-2 locales), recomendado:
+
+```bash
+PILOT_MODE=true
+DETECTION_SNAPSHOT_INTERVAL_SECONDS=8
 ```
 
 3. Levantar:
