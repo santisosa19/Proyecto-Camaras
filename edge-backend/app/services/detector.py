@@ -22,6 +22,8 @@ class Detection:
         track_id: Optional[int] = None,
         apparent_gender: Optional[str] = None,
         apparent_gender_confidence: Optional[float] = None,
+        is_employee: Optional[bool] = None,
+        employee_probability: Optional[float] = None,
     ):
         """
         Args:
@@ -36,6 +38,8 @@ class Detection:
         self.track_id = track_id
         self.apparent_gender = apparent_gender
         self.apparent_gender_confidence = apparent_gender_confidence
+        self.is_employee = is_employee
+        self.employee_probability = employee_probability
     
     @property
     def centroid(self) -> Tuple[float, float]:
@@ -60,6 +64,12 @@ class Detection:
             'apparent_gender_confidence': (
                 float(self.apparent_gender_confidence)
                 if self.apparent_gender_confidence is not None
+                else None
+            ),
+            'is_employee': self.is_employee,
+            'employee_probability': (
+                float(self.employee_probability)
+                if self.employee_probability is not None
                 else None
             ),
             'centroid': self.centroid,

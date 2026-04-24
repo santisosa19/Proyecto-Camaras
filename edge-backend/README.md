@@ -119,8 +119,12 @@ python scripts/train_employee_classifier.py \
 ### 3) Activar en runtime
 
 ```bash
+EMPLOYEE_FILTER_ENABLED=true
 EMPLOYEE_MODEL_PATH=./models/employee_classifier.pt
+EMPLOYEE_DEVICE=cpu
 EMPLOYEE_THRESHOLD=0.75
 EMPLOYEE_VOTE_WINDOW=8
 EMPLOYEE_MIN_VOTES=5
 ```
+
+Tip: en pruebas de oficina dejalo en `false`; activalo cuando montes cámara en local.

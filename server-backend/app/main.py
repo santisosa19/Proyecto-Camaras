@@ -247,7 +247,7 @@ async def get_info():
 # IMPORTAR ROUTERS
 # ============================================
 
-from app.api import cameras, dashboard, ingest, metrics, processing
+from app.api import auth, cameras, dashboard, ingest, metrics, processing
 
 # Registrar routers
 app.include_router(
@@ -278,6 +278,12 @@ app.include_router(
     dashboard.router,
     prefix="/api/v1/dashboard",
     tags=["dashboard"]
+)
+
+app.include_router(
+    auth.router,
+    prefix="/api/v1/auth",
+    tags=["auth"]
 )
 
 

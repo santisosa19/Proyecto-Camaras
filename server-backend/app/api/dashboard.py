@@ -11,8 +11,9 @@ from sqlalchemy.orm import Session
 
 from app.database.connection import get_db
 from app.models.database import CameraStatus, CrossingEvent, Detection, Heatmap
+from app.security import require_authenticated_user
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_authenticated_user)])
 
 
 def _utcnow() -> datetime:

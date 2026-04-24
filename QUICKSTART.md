@@ -12,6 +12,15 @@ Editá `.env` y definí al menos:
 - `INGEST_API_KEY`
 - `ADMIN_API_KEY`
 
+Luego creá el primer usuario admin en base de datos:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/auth/bootstrap-admin \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-API-Key: change-this-admin-key" \
+  -d '{"username":"admin","password":"ChangeThisNow123"}'
+```
+
 Si vas a correr edge:
 
 - `CAMERA_ID` y `CAMERA_NAME`

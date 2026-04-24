@@ -41,3 +41,16 @@ docker run --env-file .env -p 8000:8000 traffic-server-backend
 - `INGEST_API_KEY`: protege endpoints de ingesta remota.
 - `ADMIN_API_KEY`: protege endpoints administrativos (alta/baja/activación de cámaras y control de procesamiento).
 - En `ENVIRONMENT=production`, ambas claves son obligatorias.
+
+El login del dashboard usa usuarios en tabla `app_users`.
+
+Bootstrap inicial (una sola vez cuando no hay usuarios):
+
+```bash
+curl -X POST http://localhost:8000/api/v1/auth/bootstrap-admin \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-API-Key: <ADMIN_API_KEY>" \
+  -d '{"username":"admin","password":"ChangeThisNow123"}'
+```
+
+Con token de superadmin podés crear más usuarios con `POST /api/v1/auth/users`.

@@ -41,6 +41,7 @@ from app.services.detector import PersonDetector
 from app.services.counter import PersonCounter
 from app.services.heatmap import OccupancyHeatmap
 from app.services.apparent_gender import ApparentGenderEstimator
+from app.services.employee_classifier import TrackEmployeeFilter
 
 
 # Archivo de configuración de líneas
@@ -457,6 +458,8 @@ class TrafficAnalysisSystem:
         self.current_heatmap_hour_start: datetime | None = None
         self.gender_estimator: ApparentGenderEstimator | None = None
         self.latest_track_gender: dict[int, dict] = {}
+        self.employee_filter: TrackEmployeeFilter | None = None
+        self.latest_track_employee: dict[int, dict] = {}
 
         # Configuración de mapa de calor
         heatmap_default = "false" if self.pilot_mode else "true"
@@ -657,6 +660,36 @@ class TrafficAnalysisSystem:
             else:
                 logger.info("Género aparente deshabilitado")
 
+            employee_filter_enabled = env_bool("EMPLOYEE_FILTER_ENABLED", default=False)
+            employee_model_path = os.getenv("EMPLOYEE_MODEL_PATH", "").strip()
+            if employee_model_path and not os.path.isabs(employee_model_path):
+                employee_model_path = str(Path(__file__).parent / employee_model_path)
+            employee_device = os.getenv("EMPLOYEE_DEVICE", "cpu").strip() or "cpu"
+            employee_threshold = float(os.getenv("EMPLOYEE_THRESHOLD", "0.75"))
+            employee_vote_window = int(os.getenv("EMPLOYEE_VOTE_WINDOW", "8"))
+            employee_min_votes = int(os.getenv("EMPLOYEE_MIN_VOTES", "5"))
+
+            self.employee_filter = TrackEmployeeFilter(
+                model_path=employee_model_path if employee_filter_enabled else "",
+                device=employee_device,
+                employee_threshold=employee_threshold,
+                vote_window=employee_vote_window,
+                min_votes=employee_min_votes,
+            )
+            if self.employee_filter.enabled:
+                logger.info(
+                    "✓ Filtro de empleados habilitado (threshold=%.2f, vote_window=%s, min_votes=%s)",
+                    employee_threshold,
+                    employee_vote_window,
+                    employee_min_votes,
+                )
+            elif employee_filter_enabled:
+                logger.warning(
+                    "EMPLOYEE_FILTER_ENABLED=true, pero el filtro quedó deshabilitado. Revisá EMPLOYEE_MODEL_PATH."
+                )
+            else:
+                logger.info("Filtro de empleados deshabilitado")
+
             if self.heatmap_enabled:
                 heatmap_output_dir = (
                     os.getenv("HEATMAP_OUTPUT_DIR", "heatmaps").strip() or "heatmaps"
@@ -749,6 +782,19 @@ class TrafficAnalysisSystem:
                     )
                     self._apply_track_genders(detections, track_gender_states)
 
+                excluded_track_ids: set[int] = set()
+                if self.employee_filter is not None and self.employee_filter.enabled:
+                    track_employee_states = self.employee_filter.classify_tracks(
+                        frame=frame,
+                        detections=detections,
+                    )
+                    self._apply_track_employee_states(detections, track_employee_states)
+                    excluded_track_ids = {
+                        int(track_id)
+                        for track_id, state in track_employee_states.items()
+                        if state.is_employee
+                    }
+
                 if self.hourly_heatmap is not None and self.current_heatmap_hour_start is not None:
                     frame_hour_start = now_dt.replace(minute=0, second=0, microsecond=0)
                     if frame_hour_start > self.current_heatmap_hour_start:
@@ -789,7 +835,10 @@ class TrafficAnalysisSystem:
                         self.last_heatmap_background_update = now_ts
                 
                 # Actualizar contador
-                count_stats = self.counter.update(detections)
+                count_stats = self.counter.update(
+                    detections,
+                    excluded_track_ids=excluded_track_ids,
+                )
                 crossing_events = self.counter.pop_crossing_events()
                 
                 # Actualizar estadísticas
@@ -805,9 +854,10 @@ class TrafficAnalysisSystem:
                     # Dibujar bounding boxes
                     for det in detections:
                         x1, y1, x2, y2 = [int(x) for x in det.bbox]
-                        
-                        # Box verde
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+                        is_employee = bool(det.is_employee) if det.is_employee is not None else False
+                        box_color = (0, 165, 255) if is_employee else (0, 255, 0)
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
                         
                         # Label con ID y confianza
                         if self.gender_estimator is None or not self.gender_estimator.enabled:
@@ -818,16 +868,18 @@ class TrafficAnalysisSystem:
                             gender_short = "F"
                         else:
                             gender_short = "U"
+
+                        employee_short = "E" if is_employee else "C"
                         track_label = det.track_id if det.track_id is not None else "-"
-                        label = f"ID:{track_label} G:{gender_short} {det.confidence:.2f}"
+                        label = f"ID:{track_label} G:{gender_short} T:{employee_short} {det.confidence:.2f}"
                         cv2.putText(
                             frame, label, (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2
                         )
                         
                         # Centroid
                         cx, cy = [int(x) for x in det.centroid]
-                        cv2.circle(frame, (cx, cy), 4, (0, 255, 0), -1)
+                        cv2.circle(frame, (cx, cy), 4, box_color, -1)
                     
                     # Dibujar líneas de conteo
                     frame = self.counter.draw_lines(frame)
@@ -839,6 +891,8 @@ class TrafficAnalysisSystem:
                         f"Detectados: {len(detections)}",
                         f"Tracks activos: {count_stats['active_tracks']}",
                     ]
+                    if self.employee_filter is not None and self.employee_filter.enabled:
+                        info_lines.append(f"Empleados excluidos: {len(excluded_track_ids)}")
                     
                     # Agregar conteos de todas las líneas
                     for line_name, line_stats in count_stats.get('lines', {}).items():
@@ -1083,12 +1137,35 @@ class TrafficAnalysisSystem:
                 "updated_at": datetime.utcnow().isoformat(),
             }
 
+    def _apply_track_employee_states(self, detections, track_employee_states):
+        """Aplicar clasificación employee/non_employee por track sobre detecciones del frame."""
+        for det in detections:
+            if det.track_id is None:
+                continue
+            track_id = int(det.track_id)
+            state = track_employee_states.get(track_id)
+            if state is None:
+                continue
+            det.is_employee = bool(state.is_employee)
+            det.employee_probability = float(state.employee_probability)
+            self.latest_track_employee[track_id] = {
+                "is_employee": bool(state.is_employee),
+                "employee_probability": float(state.employee_probability),
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+
     def _build_crossing_event_metadata(self, event: dict) -> dict:
         """Construir metadata enriquecida para un evento de cruce."""
         metadata = {"position": event.get("position")}
         track_id = event.get("track_id")
         if track_id is None:
             return metadata
+
+        track_employee = self.latest_track_employee.get(int(track_id))
+        if track_employee:
+            metadata["is_employee"] = bool(track_employee.get("is_employee", False))
+            metadata["employee_probability"] = float(track_employee.get("employee_probability", 0.0))
+
         track_gender = self.latest_track_gender.get(int(track_id))
         if not track_gender:
             metadata["apparent_gender"] = "unknown"

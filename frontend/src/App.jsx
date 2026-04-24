@@ -17,17 +17,7 @@ import {
 } from "recharts";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
-
-const DEMO_USERS = [
-  { username: "admin", password: "admin123", role: "superadmin" },
-  { username: "gerente", password: "gerente123", role: "manager" },
-  {
-    username: "sucursal",
-    password: "sucursal123",
-    role: "branch_manager",
-    branch_id: "sucursal_1"
-  }
-];
+const AUTH_STORAGE_KEY = "traffic_user";
 
 const ROLE_LABELS = {
   superadmin: "Superadmin",
@@ -113,34 +103,54 @@ function genderTitle(kind, gender) {
   return `${prefix} - Sin clasificar`;
 }
 
-function useAuth() {
-  const [user, setUser] = useState(() => {
-    try {
-      const raw = localStorage.getItem("traffic_user");
-      return raw ? JSON.parse(raw) : null;
-    } catch (err) {
-      console.error("No se pudo parsear traffic_user desde localStorage:", err);
-      localStorage.removeItem("traffic_user");
-      return null;
-    }
-  });
+function parseStoredUser() {
+  try {
+    const raw = localStorage.getItem(AUTH_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    console.error("No se pudo parsear sesión desde localStorage:", err);
+    localStorage.removeItem(AUTH_STORAGE_KEY);
+    return null;
+  }
+}
 
-  const login = (username, password) => {
-    const found = DEMO_USERS.find((candidate) => candidate.username === username && candidate.password === password);
-    if (!found) return false;
+function useAuth() {
+  const [user, setUser] = useState(() => parseStoredUser());
+
+  const login = async (username, password) => {
+    const res = await fetch(`${API_BASE_URL}/api/v1/auth/login`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ username, password })
+    });
+
+    let payload = null;
+    try {
+      payload = await res.json();
+    } catch (_err) {
+      payload = null;
+    }
+
+    if (!res.ok) {
+      const message = payload?.detail || `HTTP ${res.status}`;
+      throw new Error(message);
+    }
 
     const safeUser = {
-      username: found.username,
-      role: found.role,
-      branch_id: found.branch_id || null
+      username: payload?.user?.username || username,
+      role: payload?.user?.role || "branch_manager",
+      branch_id: payload?.user?.branch_id || null,
+      token: payload?.access_token || ""
     };
-    localStorage.setItem("traffic_user", JSON.stringify(safeUser));
+    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(safeUser));
     setUser(safeUser);
     return true;
   };
 
   const logout = () => {
-    localStorage.removeItem("traffic_user");
+    localStorage.removeItem(AUTH_STORAGE_KEY);
     setUser(null);
   };
 
@@ -148,9 +158,22 @@ function useAuth() {
 }
 
 async function fetchJson(path) {
-  const res = await fetch(`${API_BASE_URL}${path}`);
+  const storedUser = parseStoredUser();
+  const headers = {};
+  if (storedUser?.token) {
+    headers.Authorization = `Bearer ${storedUser.token}`;
+  }
+
+  const res = await fetch(`${API_BASE_URL}${path}`, { headers });
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status}`);
+    let detail = "";
+    try {
+      const payload = await res.json();
+      detail = payload?.detail || "";
+    } catch (_err) {
+      detail = "";
+    }
+    throw new Error(detail || `HTTP ${res.status}`);
   }
   return res.json();
 }
@@ -417,16 +440,21 @@ function LoginPage({ onLogin }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const navigate = useNavigate();
 
-  const submit = (event) => {
+  const submit = async (event) => {
     event.preventDefault();
-    const ok = onLogin(username, password);
-    if (!ok) {
-      setError("Credenciales inválidas");
-      return;
+    setError("");
+    setIsSubmitting(true);
+    try {
+      await onLogin(username, password);
+      navigate("/");
+    } catch (err) {
+      setError(err?.message || "Credenciales inválidas");
+    } finally {
+      setIsSubmitting(false);
     }
-    navigate("/");
   };
 
   return (
@@ -448,8 +476,8 @@ function LoginPage({ onLogin }) {
           />
         </label>
         {error ? <div className="error-box">{error}</div> : null}
-        <button type="submit">Ingresar</button>
-        <small>Demo: admin/admin123, gerente/gerente123, sucursal/sucursal123</small>
+        <button type="submit" disabled={isSubmitting}>{isSubmitting ? "Validando..." : "Ingresar"}</button>
+        <small>Usá credenciales configuradas en el backend.</small>
       </form>
     </div>
   );
@@ -1018,13 +1046,13 @@ class AppErrorBoundary extends React.Component {
           <div className="login-card">
             <h1>Error de interfaz</h1>
             <p>La página falló al renderizar. Probá refrescar y limpiar sesión local.</p>
-            <button
-              type="button"
-              onClick={() => {
-                localStorage.removeItem("traffic_user");
-                window.location.reload();
-              }}
-            >
+                <button
+                  type="button"
+                  onClick={() => {
+                    localStorage.removeItem(AUTH_STORAGE_KEY);
+                    window.location.reload();
+                  }}
+                >
               Limpiar sesión y recargar
             </button>
           </div>
@@ -1060,7 +1088,7 @@ export default function App() {
 function AppContent() {
   const { user, login, logout } = useAuth();
 
-  if (!user) {
+  if (!user?.token) {
     return <LoginPage onLogin={login} />;
   }
 
