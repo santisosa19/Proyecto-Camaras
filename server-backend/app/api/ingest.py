@@ -213,6 +213,18 @@ async def ingest_heatmaps(
                 Heatmap.hour == hour,
             ).first()
 
+            existing_data = row.heatmap_data if row and isinstance(row.heatmap_data, dict) else {}
+            background_image_base64 = (
+                item.background_image_base64
+                if item.background_image_base64
+                else existing_data.get("background_image_base64")
+            )
+            overlay_png_base64 = (
+                item.overlay_png_base64
+                if item.overlay_png_base64
+                else existing_data.get("overlay_png_base64")
+            )
+
             heatmap_data = {
                 "hour_start": hour_start.isoformat(),
                 "generated_at": (item.generated_at or datetime.utcnow()).isoformat(),
@@ -223,8 +235,8 @@ async def ingest_heatmaps(
                 "stats": item.stats,
                 "branch_id": item.branch_id,
                 "branch_name": item.branch_name,
-                "background_image_base64": item.background_image_base64,
-                "overlay_png_base64": item.overlay_png_base64,
+                "background_image_base64": background_image_base64,
+                "overlay_png_base64": overlay_png_base64,
                 "is_partial": bool(item.is_partial),
             }
 

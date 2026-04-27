@@ -516,7 +516,7 @@ class TrafficAnalysisSystem:
             yolo_model_path = os.getenv("YOLO_MODEL_PATH", "yolov8n.pt").strip() or "yolov8n.pt"
             yolo_confidence = float(os.getenv("YOLO_CONFIDENCE", "0.22"))
             yolo_iou = float(os.getenv("YOLO_IOU", "0.60"))
-            yolo_image_size = int(os.getenv("YOLO_IMAGE_SIZE", "1280"))
+            yolo_image_size = int(os.getenv("YOLO_IMAGE_SIZE", "960"))
             yolo_max_det = int(os.getenv("YOLO_MAX_DETECTIONS", "120"))
             yolo_tracker = os.getenv("YOLO_TRACKER", "trackers/bytetrack_stable.yaml").strip() or "trackers/bytetrack_stable.yaml"
             yolo_device = os.getenv("YOLO_DEVICE", "auto").strip() or "auto"
@@ -615,6 +615,11 @@ class TrafficAnalysisSystem:
                 heatmap_overlay_alpha = float(os.getenv("HEATMAP_OVERLAY_ALPHA", "0.35"))
                 heatmap_blur_kernel = int(os.getenv("HEATMAP_BLUR_KERNEL", "21"))
                 heatmap_decay = float(os.getenv("HEATMAP_DECAY_PER_SECOND", "0.0"))
+                heatmap_norm_percentile = float(os.getenv("HEATMAP_NORMALIZATION_PERCENTILE", "99"))
+                heatmap_norm_rise_alpha = float(os.getenv("HEATMAP_NORMALIZATION_RISE_ALPHA", "0.08"))
+                heatmap_norm_fall_alpha = float(os.getenv("HEATMAP_NORMALIZATION_FALL_ALPHA", "0.01"))
+                heatmap_norm_gamma = float(os.getenv("HEATMAP_NORMALIZATION_GAMMA", "0.85"))
+                heatmap_overlay_min_intensity = int(os.getenv("HEATMAP_OVERLAY_MIN_INTENSITY", "1"))
 
                 self.heatmap = OccupancyHeatmap(
                     camera_id=self.camera_id,
@@ -623,6 +628,11 @@ class TrafficAnalysisSystem:
                     blur_kernel=heatmap_blur_kernel,
                     decay_per_second=heatmap_decay,
                     output_dir=heatmap_output_dir,
+                    normalization_percentile=heatmap_norm_percentile,
+                    normalization_rise_alpha=heatmap_norm_rise_alpha,
+                    normalization_fall_alpha=heatmap_norm_fall_alpha,
+                    normalization_gamma=heatmap_norm_gamma,
+                    overlay_min_intensity=heatmap_overlay_min_intensity,
                     metadata={
                         "camera_name": self.camera_name,
                         "branch_id": self.branch_id,
@@ -637,6 +647,11 @@ class TrafficAnalysisSystem:
                     blur_kernel=heatmap_blur_kernel,
                     decay_per_second=0.0,
                     output_dir=hourly_dir,
+                    normalization_percentile=heatmap_norm_percentile,
+                    normalization_rise_alpha=heatmap_norm_rise_alpha,
+                    normalization_fall_alpha=heatmap_norm_fall_alpha,
+                    normalization_gamma=heatmap_norm_gamma,
+                    overlay_min_intensity=heatmap_overlay_min_intensity,
                     metadata={
                         "camera_name": self.camera_name,
                         "branch_id": self.branch_id,
@@ -694,6 +709,11 @@ class TrafficAnalysisSystem:
                     )
                     self._apply_track_genders(detections, track_gender_states)
 
+                if self.hourly_heatmap is not None:
+                    if now_ts - self.last_heatmap_background_update >= self.heatmap_background_refresh_seconds:
+                        self.latest_heatmap_background_base64 = self._encode_background_frame(frame)
+                        self.last_heatmap_background_update = now_ts
+
                 if self.hourly_heatmap is not None and self.current_heatmap_hour_start is not None:
                     frame_hour_start = now_dt.replace(minute=0, second=0, microsecond=0)
                     if frame_hour_start > self.current_heatmap_hour_start:
@@ -729,9 +749,6 @@ class TrafficAnalysisSystem:
                             is_partial=True,
                         )
                         self.last_hourly_heatmap_partial_flush = now_ts
-                    if now_ts - self.last_heatmap_background_update >= self.heatmap_background_refresh_seconds:
-                        self.latest_heatmap_background_base64 = self._encode_background_frame(frame)
-                        self.last_heatmap_background_update = now_ts
                 
                 # Actualizar contador
                 count_stats = self.counter.update(detections)
@@ -1088,6 +1105,9 @@ class TrafficAnalysisSystem:
             return
 
         snapshot = self.hourly_heatmap.snapshot()
+        overlay_png_base64 = self.hourly_heatmap.export_overlay_png_base64()
+        if overlay_png_base64 is None and self.heatmap is not None:
+            overlay_png_base64 = self.heatmap.export_overlay_png_base64()
         payload = {
             "camera_id": self.camera_id,
             "camera_name": self.camera_name,
@@ -1101,7 +1121,7 @@ class TrafficAnalysisSystem:
             "grid": snapshot["grid"],
             "stats": snapshot["stats"],
             "background_image_base64": self.latest_heatmap_background_base64,
-            "overlay_png_base64": self.hourly_heatmap.export_overlay_png_base64(),
+            "overlay_png_base64": overlay_png_base64,
             "is_partial": is_partial,
         }
         self.remote_ingest.enqueue_heatmap(payload)

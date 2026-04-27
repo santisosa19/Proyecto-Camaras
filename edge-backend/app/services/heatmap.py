@@ -31,10 +31,14 @@ class OccupancyHeatmap:
         decay_per_second: float = 0.0,
         output_dir: str = "heatmaps",
         metadata: Optional[Dict] = None,
-        anchor_y_ratio: float = 0.88,
         trail_enabled: bool = True,
         trail_stale_seconds: float = 2.5,
         min_sample_weight: float = 0.02,
+        normalization_percentile: float = 99.0,
+        normalization_rise_alpha: float = 0.08,
+        normalization_fall_alpha: float = 0.01,
+        normalization_gamma: float = 0.85,
+        overlay_min_intensity: int = 1,
     ):
         self.camera_id = camera_id
         self.cell_size = max(4, int(cell_size))
@@ -45,10 +49,14 @@ class OccupancyHeatmap:
         self.decay_per_second = max(0.0, float(decay_per_second))
         self.output_dir = Path(output_dir)
         self.metadata = metadata or {}
-        self.anchor_y_ratio = float(np.clip(anchor_y_ratio, 0.5, 0.98))
         self.trail_enabled = bool(trail_enabled)
         self.trail_stale_seconds = max(0.5, float(trail_stale_seconds))
         self.min_sample_weight = max(1e-3, float(min_sample_weight))
+        self.normalization_percentile = float(np.clip(normalization_percentile, 90.0, 100.0))
+        self.normalization_rise_alpha = float(np.clip(normalization_rise_alpha, 0.01, 1.0))
+        self.normalization_fall_alpha = float(np.clip(normalization_fall_alpha, 0.001, 1.0))
+        self.normalization_gamma = float(np.clip(normalization_gamma, 0.5, 2.0))
+        self.overlay_min_intensity = max(0, min(255, int(overlay_min_intensity)))
 
         self.grid: Optional[np.ndarray] = None
         self.grid_h = 0
@@ -58,6 +66,7 @@ class OccupancyHeatmap:
         self.total_samples = 0
         self.total_weight = 0.0
         self.last_update_ts: Optional[float] = None
+        self.render_reference_value = 0.0
         self.track_last_cell: Dict[int, Tuple[int, int]] = {}
         self.track_last_seen_ts: Dict[int, float] = {}
 
@@ -105,6 +114,7 @@ class OccupancyHeatmap:
         self.total_samples = 0
         self.total_weight = 0.0
         self.last_update_ts = None
+        self.render_reference_value = 0.0
         self.track_last_cell.clear()
         self.track_last_seen_ts.clear()
 
@@ -134,12 +144,9 @@ class OccupancyHeatmap:
             return
 
         for det in detections:
-            x1, y1, x2, y2 = det.bbox
-            anchor_x = (float(x1) + float(x2)) / 2.0
-            anchor_y = float(y1) + (float(y2) - float(y1)) * self.anchor_y_ratio
-
-            x = int(np.clip(anchor_x, 0, self.frame_w - 1))
-            y = int(np.clip(anchor_y, 0, self.frame_h - 1))
+            cx, cy = det.centroid
+            x = int(np.clip(cx, 0, self.frame_w - 1))
+            y = int(np.clip(cy, 0, self.frame_h - 1))
             cell_x = min(self.grid_w - 1, x // self.cell_size)
             cell_y = min(self.grid_h - 1, y // self.cell_size)
 
@@ -184,11 +191,28 @@ class OccupancyHeatmap:
         if non_zero.size == 0:
             return None
 
-        high = float(np.percentile(non_zero, 99))
+        high = float(np.percentile(non_zero, self.normalization_percentile))
         if high <= 0:
             return None
 
-        norm = np.clip(heat / high, 0.0, 1.0)
+        if self.render_reference_value <= 0:
+            self.render_reference_value = high
+        elif high >= self.render_reference_value:
+            alpha = self.normalization_rise_alpha
+            self.render_reference_value = (
+                (1.0 - alpha) * self.render_reference_value + alpha * high
+            )
+        else:
+            alpha = self.normalization_fall_alpha
+            self.render_reference_value = (
+                (1.0 - alpha) * self.render_reference_value + alpha * high
+            )
+
+        stable_reference = max(self.render_reference_value, 1e-6)
+
+        norm = np.clip(heat / stable_reference, 0.0, 1.0)
+        if self.normalization_gamma != 1.0:
+            norm = np.power(norm, self.normalization_gamma)
         return (norm * 255).astype(np.uint8)
 
     def render_overlay(self, frame: np.ndarray) -> np.ndarray:
@@ -209,7 +233,7 @@ class OccupancyHeatmap:
         colored = cv2.applyColorMap(heat_u8, cv2.COLORMAP_JET)
         output = frame.copy()
 
-        mask = heat_u8 > 3
+        mask = heat_u8 > self.overlay_min_intensity
         output[mask] = cv2.addWeighted(
             frame[mask],
             1.0 - self.overlay_alpha,

@@ -15,7 +15,7 @@ def parse_args():
     parser.add_argument("--source", required=True, help="RTSP URL o ruta de video")
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--model", default="yolov8n.pt")
-    parser.add_argument("--conf", default=0.5, type=float)
+    parser.add_argument("--config", default=0.5, type=float)
     parser.add_argument("--sample-every", default=12, type=int, help="Procesar 1 de cada N frames")
     parser.add_argument("--min-width", default=50, type=int)
     parser.add_argument("--min-height", default=90, type=int)

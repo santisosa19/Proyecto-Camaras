@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class VideoCapture:
     """
-    Captura de video desde fuente RTSP con reconexión automática
+    Captura de video desde fuente RTSP con reconexíon automática
     """
     
     def __init__(

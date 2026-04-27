@@ -407,15 +407,23 @@ function HeatmapCameraGrid({ cameras, overlayOpacity }) {
               <StatusPill online={camera.is_connected} />
             </div>
 
-            {backgroundSrc && overlaySrc ? (
+            {backgroundSrc || overlaySrc ? (
               <div className="heatmap-stage">
-                <img src={backgroundSrc} alt={`Referencia ${camera.camera_name || camera.camera_id}`} />
-                <img
-                  src={overlaySrc}
-                  alt={`Heatmap ${camera.camera_name || camera.camera_id}`}
-                  className="heatmap-overlay"
-                  style={{ opacity: overlayOpacity }}
-                />
+                {backgroundSrc ? (
+                  <img src={backgroundSrc} alt={`Referencia ${camera.camera_name || camera.camera_id}`} />
+                ) : (
+                  <div className="heatmap-placeholder">Sin fondo de referencia</div>
+                )}
+                {overlaySrc ? (
+                  <img
+                    src={overlaySrc}
+                    alt={`Heatmap ${camera.camera_name || camera.camera_id}`}
+                    className="heatmap-overlay"
+                    style={{ opacity: overlayOpacity }}
+                  />
+                ) : (
+                  <div className="heatmap-overlay-missing">Sin overlay para este slot</div>
+                )}
               </div>
             ) : (
               <div className="empty-state">Sin heatmap para esta cámara en la hora seleccionada.</div>
