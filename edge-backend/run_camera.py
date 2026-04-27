@@ -594,10 +594,10 @@ class TrafficAnalysisSystem:
                 model_weights_path=gender_model_weights,
                 model_dir=gender_model_dir,
                 auto_download=os.getenv("GENDER_AUTO_DOWNLOAD_MODEL", "true").lower() == "true",
-                sample_every_n_frames=int(os.getenv("GENDER_SAMPLE_EVERY_N_FRAMES", "10")),
+                sample_every_n_frames=int(os.getenv("GENDER_SAMPLE_EVERY_N_FRAMES", "5")),
                 vote_window=int(os.getenv("GENDER_VOTE_WINDOW", "12")),
-                min_votes=int(os.getenv("GENDER_MIN_VOTES", "4")),
-                confidence_threshold=float(os.getenv("GENDER_CONFIDENCE_THRESHOLD", "0.58")),
+                min_votes=int(os.getenv("GENDER_MIN_VOTES", "2")),
+                confidence_threshold=float(os.getenv("GENDER_CONFIDENCE_THRESHOLD", "0.52")),
                 stale_track_seconds=float(os.getenv("GENDER_STALE_TRACK_SECONDS", "25")),
             )
             if self.gender_estimator.enabled:

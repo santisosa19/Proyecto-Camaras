@@ -49,10 +49,10 @@ class ApparentGenderEstimator:
         model_weights_path: str = "",
         model_dir: str = "models/gender",
         auto_download: bool = True,
-        sample_every_n_frames: int = 10,
+        sample_every_n_frames: int = 5,
         vote_window: int = 12,
-        min_votes: int = 4,
-        confidence_threshold: float = 0.58,
+        min_votes: int = 2,
+        confidence_threshold: float = 0.52,
         stale_track_seconds: float = 25.0,
     ):
         self.enabled = bool(enabled)
@@ -138,22 +138,27 @@ class ApparentGenderEstimator:
         if person_crop is None or person_crop.size == 0:
             return None
 
-        gray = cv2.cvtColor(person_crop, cv2.COLOR_BGR2GRAY)
+        # Priorizamos la parte alta del cuerpo donde suele estar el rostro.
+        head_h = max(24, int(person_crop.shape[0] * 0.62))
+        head_crop = person_crop[:head_h, :]
+
+        gray = cv2.cvtColor(head_crop, cv2.COLOR_BGR2GRAY)
+        gray = cv2.equalizeHist(gray)
         faces = self.face_cascade.detectMultiScale(
             gray,
-            scaleFactor=1.1,
-            minNeighbors=4,
-            minSize=(28, 28),
+            scaleFactor=1.08,
+            minNeighbors=3,
+            minSize=(20, 20),
         )
         if len(faces) == 0:
             return None
 
         x, y, w, h = max(faces, key=lambda face: int(face[2] * face[3]))
-        x2 = min(person_crop.shape[1], x + w)
-        y2 = min(person_crop.shape[0], y + h)
+        x2 = min(head_crop.shape[1], x + w)
+        y2 = min(head_crop.shape[0], y + h)
         if x2 <= x or y2 <= y:
             return None
-        return person_crop[y:y2, x:x2]
+        return head_crop[y:y2, x:x2]
 
     def _predict_face_gender(self, face_bgr: np.ndarray) -> tuple[str, float]:
         if self.gender_net is None:
@@ -186,15 +191,21 @@ class ApparentGenderEstimator:
         if not history:
             return TrackGenderState()
 
+        informative_votes = [
+            (label, confidence)
+            for label, confidence in history
+            if label in {"male", "female"}
+        ]
+
         weights = {"male": 0.0, "female": 0.0, "unknown": 0.0}
-        for label, confidence in history:
+        for label, confidence in informative_votes:
             safe_label = label if label in weights else "unknown"
             if safe_label == "unknown":
                 weights[safe_label] += 0.12
             else:
                 weights[safe_label] += max(0.05, float(confidence))
 
-        votes = len(history)
+        votes = len(informative_votes)
         if votes < self.min_votes:
             return TrackGenderState(label="unknown", confidence=0.0, votes=votes)
 
@@ -257,12 +268,10 @@ class ApparentGenderEstimator:
                     face = self._extract_best_face(person_crop)
                     if face is not None:
                         label, confidence = self._predict_face_gender(face)
-                        self.track_votes[track_id].append((label, confidence))
-                    else:
-                        self.track_votes[track_id].append(("unknown", 0.0))
+                        if label in {"male", "female"}:
+                            self.track_votes[track_id].append((label, confidence))
 
             results[track_id] = self._aggregate_track_state(track_id)
 
         self._evict_stale_tracks(ts)
         return results
-

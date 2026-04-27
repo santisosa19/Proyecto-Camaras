@@ -9,7 +9,7 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -31,6 +31,10 @@ class OccupancyHeatmap:
         decay_per_second: float = 0.0,
         output_dir: str = "heatmaps",
         metadata: Optional[Dict] = None,
+        anchor_y_ratio: float = 0.88,
+        trail_enabled: bool = True,
+        trail_stale_seconds: float = 2.5,
+        min_sample_weight: float = 0.02,
     ):
         self.camera_id = camera_id
         self.cell_size = max(4, int(cell_size))
@@ -41,6 +45,10 @@ class OccupancyHeatmap:
         self.decay_per_second = max(0.0, float(decay_per_second))
         self.output_dir = Path(output_dir)
         self.metadata = metadata or {}
+        self.anchor_y_ratio = float(np.clip(anchor_y_ratio, 0.5, 0.98))
+        self.trail_enabled = bool(trail_enabled)
+        self.trail_stale_seconds = max(0.5, float(trail_stale_seconds))
+        self.min_sample_weight = max(1e-3, float(min_sample_weight))
 
         self.grid: Optional[np.ndarray] = None
         self.grid_h = 0
@@ -50,6 +58,18 @@ class OccupancyHeatmap:
         self.total_samples = 0
         self.total_weight = 0.0
         self.last_update_ts: Optional[float] = None
+        self.track_last_cell: Dict[int, Tuple[int, int]] = {}
+        self.track_last_seen_ts: Dict[int, float] = {}
+
+    def _evict_stale_tracks(self, now_ts: float):
+        stale_ids = [
+            track_id
+            for track_id, seen_ts in self.track_last_seen_ts.items()
+            if (now_ts - seen_ts) > self.trail_stale_seconds
+        ]
+        for track_id in stale_ids:
+            self.track_last_seen_ts.pop(track_id, None)
+            self.track_last_cell.pop(track_id, None)
 
     def _ensure_grid(self, frame_shape: tuple[int, int, int] | tuple[int, int]):
         frame_h, frame_w = frame_shape[:2]
@@ -85,6 +105,8 @@ class OccupancyHeatmap:
         self.total_samples = 0
         self.total_weight = 0.0
         self.last_update_ts = None
+        self.track_last_cell.clear()
+        self.track_last_seen_ts.clear()
 
     def update(
         self,
@@ -108,20 +130,42 @@ class OccupancyHeatmap:
             self.grid *= decay
 
         if not detections:
+            self._evict_stale_tracks(now)
             return
 
         for det in detections:
-            cx, cy = det.centroid
-            x = int(np.clip(cx, 0, self.frame_w - 1))
-            y = int(np.clip(cy, 0, self.frame_h - 1))
+            x1, y1, x2, y2 = det.bbox
+            anchor_x = (float(x1) + float(x2)) / 2.0
+            anchor_y = float(y1) + (float(y2) - float(y1)) * self.anchor_y_ratio
+
+            x = int(np.clip(anchor_x, 0, self.frame_w - 1))
+            y = int(np.clip(anchor_y, 0, self.frame_h - 1))
             cell_x = min(self.grid_w - 1, x // self.cell_size)
             cell_y = min(self.grid_h - 1, y // self.cell_size)
 
             conf_weight = float(np.clip(det.confidence, 0.1, 1.0))
-            weight = conf_weight * max(delta_t, 1e-3)
+            weight = max(self.min_sample_weight, conf_weight * max(delta_t, 1e-3))
             self.grid[cell_y, cell_x] += weight
+
+            if self.trail_enabled and det.track_id is not None:
+                track_id = int(det.track_id)
+                prev_cell = self.track_last_cell.get(track_id)
+                if prev_cell is not None and prev_cell != (cell_x, cell_y):
+                    cv2.line(
+                        self.grid,
+                        prev_cell,
+                        (cell_x, cell_y),
+                        color=float(weight * 0.7),
+                        thickness=1,
+                        lineType=cv2.LINE_AA,
+                    )
+                self.track_last_cell[track_id] = (cell_x, cell_y)
+                self.track_last_seen_ts[track_id] = now
+
             self.total_samples += 1
             self.total_weight += weight
+
+        self._evict_stale_tracks(now)
 
     def _build_normalized_heat(self) -> Optional[np.ndarray]:
         if self.grid is None:
