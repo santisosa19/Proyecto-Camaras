@@ -253,6 +253,25 @@ a:hover {
   padding: 0.6rem;
 }
 
+.date-range-actions {
+  margin-top: 0.5rem;
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.45rem;
+}
+
+.date-range-btn {
+  padding: 0.42rem 0.7rem;
+  border-radius: 8px;
+  font-size: 0.82rem;
+}
+
+.date-range-btn.secondary {
+  background: #ffffff;
+  color: var(--ink);
+  border: 1px solid var(--border);
+}
+
 .control-group label {
   color: var(--muted);
   font-size: 0.84rem;

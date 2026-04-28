@@ -23,27 +23,48 @@ function rangeLabel(startDate, endDate) {
 
 export function DateRangeFilter({ startDate, endDate, onChange }) {
   const [isOpen, setIsOpen] = useState(false);
+  const [draftRange, setDraftRange] = useState({ from: undefined, to: undefined });
   const containerRef = useRef(null);
 
-  const selected = useMemo(
-    () => ({
+  const selected = useMemo(() => {
+    if (isOpen) {
+      return draftRange;
+    }
+
+    return {
       from: parseIsoDate(startDate),
       to: parseIsoDate(endDate)
-    }),
-    [startDate, endDate]
-  );
+    };
+  }, [draftRange, endDate, isOpen, startDate]);
 
   const handleSelect = (range) => {
-    const from = toLocalIsoDate(range?.from);
-    const to = toLocalIsoDate(range?.to);
-    if (!from || !to) {
-      return;
-    }
+    setDraftRange({ from: range?.from, to: range?.to });
+  };
 
+  const handleApply = () => {
+    const from = toLocalIsoDate(draftRange.from);
+    if (!from) return;
+    const to = toLocalIsoDate(draftRange.to || draftRange.from);
     onChange({ startDate: from, endDate: to });
-    if (from !== to) {
-      setIsOpen(false);
-    }
+    setIsOpen(false);
+  };
+
+  const handleCancel = () => {
+    setIsOpen(false);
+  };
+
+  const handleClear = () => {
+    setDraftRange({ from: undefined, to: undefined });
+  };
+
+  const handleToggle = () => {
+    setIsOpen((prev) => {
+      const next = !prev;
+      if (next) {
+        setDraftRange({ from: undefined, to: undefined });
+      }
+      return next;
+    });
   };
 
   useEffect(() => {
@@ -63,12 +84,23 @@ export function DateRangeFilter({ startDate, endDate, onChange }) {
 
   return (
     <div className="date-range-filter" ref={containerRef}>
-      <button type="button" className="date-range-trigger" onClick={() => setIsOpen((prev) => !prev)}>
+      <button type="button" className="date-range-trigger" onClick={handleToggle}>
         {rangeLabel(startDate, endDate)}
       </button>
       {isOpen ? (
         <div className="date-range-popover">
           <DayPicker mode="range" min={1} selected={selected} onSelect={handleSelect} numberOfMonths={1} />
+          <div className="date-range-actions">
+            <button type="button" className="date-range-btn secondary" onClick={handleClear}>
+              Limpiar
+            </button>
+            <button type="button" className="date-range-btn secondary" onClick={handleCancel}>
+              Cancelar
+            </button>
+            <button type="button" className="date-range-btn" onClick={handleApply}>
+              Aplicar
+            </button>
+          </div>
         </div>
       ) : null}
     </div>

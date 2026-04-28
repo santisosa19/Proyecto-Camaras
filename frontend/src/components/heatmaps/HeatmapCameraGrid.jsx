@@ -54,6 +54,8 @@ export function HeatmapCameraGrid({ cameras, overlayOpacity }) {
 
             <div className="heatmap-meta">
               <span>Muestras: {formatNumber(stats.samples || 0)}</span>
+              <span>Acumulado hora: {formatNumber(Number(stats.sum_value || 0).toFixed(0))}</span>
+              <span>Peso total: {formatNumber(Number(stats.total_weight || 0).toFixed(0))}</span>
               <span>Intensidad máx: {Number(stats.max_value || 0).toFixed(2)}</span>
               <span>
                 Hotspot: {stats.hotspot ? `${formatNumber(stats.hotspot.x)}, ${formatNumber(stats.hotspot.y)}` : "-"}
