@@ -1211,8 +1211,8 @@ def main():
     
     # Configuración de la cámara
     CAMERA_CONFIG = {
-        'camera_id': 'camara_prueba_marathon',
-        'camera_name': 'Cámara de Prueba Marathon',
+        'camera_id': os.getenv('CAMERA_ID', 'camara_default').strip(),
+        'camera_name': os.getenv('CAMERA_ID', 'Camara Default').strip(),
         'rtsp_url': os.getenv('CAMERA_RTSP_URL', '').strip(),
         'entry_direction': 'positive',  # positive = entra, negative = sale
         'show_window': os.getenv('SHOW_WINDOW', 'false').lower() == 'true',

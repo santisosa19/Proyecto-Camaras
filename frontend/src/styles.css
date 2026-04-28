@@ -225,6 +225,34 @@ a:hover {
   min-width: 150px;
 }
 
+.date-range-filter {
+  position: relative;
+  min-width: 280px;
+}
+
+.date-range-trigger {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.58rem 0.65rem;
+  background: #fff;
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.date-range-popover {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  left: 0;
+  z-index: 20;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: var(--shadow);
+  padding: 0.6rem;
+}
+
 .control-group label {
   color: var(--muted);
   font-size: 0.84rem;

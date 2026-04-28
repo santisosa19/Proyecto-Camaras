@@ -20,6 +20,29 @@ def _utcnow() -> datetime:
     return datetime.utcnow()
 
 
+def _resolve_time_window(
+    hours: int,
+    start_date: date | None,
+    end_date: date | None,
+) -> tuple[datetime, datetime, date, date]:
+    if start_date is None and end_date is None:
+        since = _utcnow() - timedelta(hours=hours)
+        until = _utcnow()
+        return since, until, since.date(), until.date()
+
+    if start_date is None:
+        start_date = end_date
+    if end_date is None:
+        end_date = start_date
+
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
+    since = datetime.combine(start_date, datetime.min.time())
+    until = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
+    return since, until, start_date, end_date
+
+
 def _empty_gender_bucket() -> dict[str, int]:
     return {"male": 0, "female": 0, "unknown": 0}
 
@@ -80,12 +103,15 @@ def _latest_counts_by_camera(db: Session, camera_ids: list[str]) -> dict[str, in
     return result
 
 
-def _crossings_today_by_camera(db: Session, camera_ids: list[str]) -> dict[str, dict[str, int]]:
+def _crossings_in_range_by_camera(
+    db: Session,
+    camera_ids: list[str],
+    since: datetime,
+    until: datetime,
+) -> dict[str, dict[str, int]]:
     if not camera_ids:
         return {}
 
-    start = datetime.combine(date.today(), datetime.min.time())
-    end = start + timedelta(days=1)
     rows = (
         db.query(
             CrossingEvent.camera_id,
@@ -94,8 +120,8 @@ def _crossings_today_by_camera(db: Session, camera_ids: list[str]) -> dict[str, 
         )
         .filter(
             CrossingEvent.camera_id.in_(camera_ids),
-            CrossingEvent.timestamp >= start,
-            CrossingEvent.timestamp < end,
+            CrossingEvent.timestamp >= since,
+            CrossingEvent.timestamp < until,
         )
         .group_by(CrossingEvent.camera_id, CrossingEvent.event_type)
         .all()
@@ -109,9 +135,11 @@ def _crossings_today_by_camera(db: Session, camera_ids: list[str]) -> dict[str, 
     return result
 
 
-def _crossings_today_with_gender_by_camera(
+def _crossings_in_range_with_gender_by_camera(
     db: Session,
     camera_ids: list[str],
+    since: datetime,
+    until: datetime,
 ) -> tuple[dict[str, dict[str, int]], dict[str, dict[str, dict[str, int]]]]:
     if not camera_ids:
         return {}, {}
@@ -122,8 +150,6 @@ def _crossings_today_with_gender_by_camera(
         for camera_id in camera_ids
     }
 
-    start = datetime.combine(date.today(), datetime.min.time())
-    end = start + timedelta(days=1)
     rows = (
         db.query(
             CrossingEvent.camera_id,
@@ -132,8 +158,8 @@ def _crossings_today_with_gender_by_camera(
         )
         .filter(
             CrossingEvent.camera_id.in_(camera_ids),
-            CrossingEvent.timestamp >= start,
-            CrossingEvent.timestamp < end,
+            CrossingEvent.timestamp >= since,
+            CrossingEvent.timestamp < until,
         )
         .all()
     )
@@ -167,8 +193,12 @@ def _hourly_flow(
     db: Session,
     camera_ids: list[str],
     since: datetime,
+    until: datetime,
 ) -> list[dict[str, Any]]:
     if not camera_ids:
+        return []
+
+    if until <= since:
         return []
 
     rows = (
@@ -176,6 +206,7 @@ def _hourly_flow(
         .filter(
             CrossingEvent.camera_id.in_(camera_ids),
             CrossingEvent.timestamp >= since,
+            CrossingEvent.timestamp < until,
         )
         .all()
     )
@@ -188,13 +219,13 @@ def _hourly_flow(
         elif row.event_type == "exit":
             buckets[bucket_dt]["exit"] += 1
 
-    now = _utcnow().replace(minute=0, second=0, microsecond=0)
+    end_hour = (until - timedelta(seconds=1)).replace(minute=0, second=0, microsecond=0)
     start = since.replace(minute=0, second=0, microsecond=0)
 
     occupancy = 0
     flow_series: list[dict[str, Any]] = []
     current = start
-    while current <= now:
+    while current <= end_hour:
         entry = buckets[current]["entry"] if current in buckets else 0
         exit_ = buckets[current]["exit"] if current in buckets else 0
         net = entry - exit_
@@ -388,6 +419,8 @@ def _pick_heatmap_slot(
 @router.get("/overview")
 async def get_overview(
     hours: int = Query(default=24, ge=1, le=168),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
     top_branches: int = Query(default=5, ge=1, le=20),
     db: Session = Depends(get_db),
 ):
@@ -396,11 +429,16 @@ async def get_overview(
     """
     cameras = db.query(CameraStatus).all()
     camera_ids = [camera.camera_id for camera in cameras]
+    since, until, resolved_start_date, resolved_end_date = _resolve_time_window(
+        hours=hours,
+        start_date=start_date,
+        end_date=end_date,
+    )
 
     latest_counts = _latest_counts_by_camera(db, camera_ids)
-    crossings_by_camera = _crossings_today_by_camera(db, camera_ids)
+    crossings_by_camera = _crossings_in_range_by_camera(db, camera_ids, since=since, until=until)
     branch_cards = _build_branch_cards(cameras, latest_counts, crossings_by_camera)
-    flow_series = _hourly_flow(db, camera_ids, since=_utcnow() - timedelta(hours=hours))
+    flow_series = _hourly_flow(db, camera_ids, since=since, until=until)
     alerts = _build_alerts(cameras, latest_counts)
 
     entries_today = sum(item.get("entry", 0) for item in crossings_by_camera.values())
@@ -410,7 +448,9 @@ async def get_overview(
 
     return {
         "timestamp": _utcnow().isoformat(),
-        "window_hours": hours,
+        "window_hours": max(1, int((until - since).total_seconds() // 3600)),
+        "start_date": resolved_start_date.isoformat(),
+        "end_date": resolved_end_date.isoformat(),
         "total_branches": len(branch_cards),
         "total_cameras": total_cameras,
         "online_cameras": online_cameras,
@@ -448,7 +488,14 @@ async def list_branch_cards(
     cameras = db.query(CameraStatus).all()
     camera_ids = [camera.camera_id for camera in cameras]
     latest_counts = _latest_counts_by_camera(db, camera_ids)
-    crossings_by_camera = _crossings_today_by_camera(db, camera_ids)
+    today_start = datetime.combine(date.today(), datetime.min.time())
+    tomorrow_start = today_start + timedelta(days=1)
+    crossings_by_camera = _crossings_in_range_by_camera(
+        db,
+        camera_ids,
+        since=today_start,
+        until=tomorrow_start,
+    )
     branches = _build_branch_cards(cameras, latest_counts, crossings_by_camera)
 
     if q:
@@ -480,6 +527,8 @@ async def list_branch_cards(
 async def get_branch_detail(
     branch_id: str,
     hours: int = Query(default=24, ge=1, le=168),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
     db: Session = Depends(get_db)
 ):
     """
@@ -488,10 +537,20 @@ async def get_branch_detail(
     cameras = db.query(CameraStatus).all()
     branch_cameras = [camera for camera in cameras if _camera_branch_info(camera)[0] == branch_id]
     camera_ids = [camera.camera_id for camera in branch_cameras]
+    since, until, resolved_start_date, resolved_end_date = _resolve_time_window(
+        hours=hours,
+        start_date=start_date,
+        end_date=end_date,
+    )
 
     latest_counts = _latest_counts_by_camera(db, camera_ids)
-    crossings_by_camera, crossings_gender_by_camera = _crossings_today_with_gender_by_camera(db, camera_ids)
-    flow_series = _hourly_flow(db, camera_ids, since=_utcnow() - timedelta(hours=hours))
+    crossings_by_camera, crossings_gender_by_camera = _crossings_in_range_with_gender_by_camera(
+        db,
+        camera_ids,
+        since=since,
+        until=until,
+    )
+    flow_series = _hourly_flow(db, camera_ids, since=since, until=until)
 
     cameras_payload = []
     for camera in branch_cameras:
@@ -521,7 +580,9 @@ async def get_branch_detail(
 
     return {
         "timestamp": _utcnow().isoformat(),
-        "window_hours": hours,
+        "window_hours": max(1, int((until - since).total_seconds() // 3600)),
+        "start_date": resolved_start_date.isoformat(),
+        "end_date": resolved_end_date.isoformat(),
         "branch_id": branch_id,
         "branch_name": _camera_branch_info(branch_cameras[0])[1] if branch_cameras else branch_id,
         "entries_today": entries_today,
