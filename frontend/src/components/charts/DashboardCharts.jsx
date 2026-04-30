@@ -16,16 +16,88 @@ import {
 } from "recharts";
 import { CHART_COLORS } from "../../constants/app";
 import { branchShortName, chartTickLabel, formatDateTime, formatNumber } from "../../utils/formatters";
-import { ChartTooltip } from "../common/ChartTooltip";
+
+function TrafficTooltip({ active, label, payload }) {
+  if (!active || !payload?.length) return null;
+
+  const row = payload[0]?.payload;
+  if (!row) return null;
+
+  const entry = Number(row.entry || 0);
+  const exit = Number(row.exit || 0);
+  const occupancy = Number(row.occupancy_end || 0);
+  const title = row.tooltipLabel || label || "-";
+
+  return (
+    <div className="chart-tooltip">
+      <p>{title}</p>
+      <div className="tooltip-row">
+        <span style={{ color: CHART_COLORS.entry }}>Entradas:</span>
+        <strong>{formatNumber(entry)}</strong>
+      </div>
+      <div className="tooltip-row">
+        <span style={{ color: CHART_COLORS.exit }}>Salidas:</span>
+        <strong>{formatNumber(exit)}</strong>
+      </div>
+      <div className="tooltip-row">
+        <span style={{ color: CHART_COLORS.occupancy }}>Ocupacion:</span>
+        <strong>{formatNumber(occupancy)}</strong>
+      </div>
+    </div>
+  );
+}
 
 export function TrafficChart({ series, windowHours }) {
   const data = useMemo(
-    () =>
-      (series || []).map((item) => ({
+    () => {
+      const rows = series || [];
+      if (windowHours >= 168) {
+        const byDay = new Map();
+
+        rows.forEach((item) => {
+          const dt = new Date(item.hour);
+          if (Number.isNaN(dt.getTime())) return;
+          const year = dt.getFullYear();
+          const month = String(dt.getMonth() + 1).padStart(2, "0");
+          const day = String(dt.getDate()).padStart(2, "0");
+          const dayKey = `${year}-${month}-${day}`;
+          const bucket = byDay.get(dayKey) || {
+            dayKey,
+            entry: 0,
+            exit: 0,
+            occupancy_end: 0,
+            latestHour: item.hour
+          };
+
+          bucket.entry += Number(item.entry || 0);
+          bucket.exit += Number(item.exit || 0);
+
+          if (item.hour >= bucket.latestHour) {
+            bucket.latestHour = item.hour;
+            bucket.occupancy_end = Number(item.occupancy_end || 0);
+          }
+
+          byDay.set(dayKey, bucket);
+        });
+
+        return Array.from(byDay.values())
+          .sort((a, b) => a.dayKey.localeCompare(b.dayKey))
+          .map((item) => ({
+            ...item,
+            chartLabel: new Date(`${item.dayKey}T00:00:00`).toLocaleDateString("es-AR", {
+              day: "2-digit",
+              month: "2-digit"
+            }),
+            tooltipLabel: item.dayKey
+          }));
+      }
+
+      return rows.map((item) => ({
         ...item,
         chartLabel: chartTickLabel(item.hour, windowHours),
         tooltipLabel: formatDateTime(item.hour)
-      })),
+      }));
+    },
     [series, windowHours]
   );
 
@@ -34,7 +106,7 @@ export function TrafficChart({ series, windowHours }) {
   }
 
   return (
-    <div className="chart-wrap">
+    <div className="chart-wrap" role="img" aria-label="Grafico de entradas, salidas y ocupacion">
       <ResponsiveContainer width="100%" height={320}>
         <ComposedChart data={data} margin={{ top: 6, right: 14, bottom: 6, left: 4 }}>
           <CartesianGrid stroke="#e6edf2" strokeDasharray="3 3" />
@@ -42,9 +114,8 @@ export function TrafficChart({ series, windowHours }) {
           <YAxis yAxisId="left" tick={{ fontSize: 11 }} allowDecimals={false} />
           <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} allowDecimals={false} />
           <Tooltip
-            content={<ChartTooltip />}
-            formatter={(value, name) => [formatNumber(value), name]}
-            labelFormatter={(_, payload) => payload?.[0]?.payload?.tooltipLabel || "-"}
+            shared
+            content={<TrafficTooltip />}
           />
           <Legend />
           <Bar yAxisId="left" dataKey="entry" name="Entradas" fill={CHART_COLORS.entry} radius={[6, 6, 0, 0]} />
@@ -73,7 +144,7 @@ export function CameraHealthDonut({ health }) {
   }
 
   return (
-    <div className="donut-wrap">
+    <div className="donut-wrap" role="img" aria-label="Distribucion del estado de camaras">
       <ResponsiveContainer width="100%" height={245}>
         <PieChart>
           <Pie data={data} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={62} outerRadius={92} paddingAngle={2}>
@@ -105,7 +176,7 @@ export function TopBranchesChart({ branches }) {
   }
 
   return (
-    <div className="chart-wrap">
+    <div className="chart-wrap" role="img" aria-label="Comparativo de sucursales por entradas y ocupacion">
       <ResponsiveContainer width="100%" height={280}>
         <BarChart data={data} layout="vertical" margin={{ top: 8, right: 10, left: 8, bottom: 4 }}>
           <CartesianGrid stroke="#e6edf2" strokeDasharray="3 3" />
@@ -136,7 +207,7 @@ export function BranchOverviewChart({ branches }) {
   }
 
   return (
-    <div className="chart-wrap">
+    <div className="chart-wrap" role="img" aria-label="Comparativo de sucursales por entradas y salidas">
       <ResponsiveContainer width="100%" height={280}>
         <BarChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 8 }}>
           <CartesianGrid stroke="#e6edf2" strokeDasharray="3 3" />
@@ -167,7 +238,7 @@ export function CameraLoadChart({ cameras }) {
   }
 
   return (
-    <div className="chart-wrap">
+    <div className="chart-wrap" role="img" aria-label="Performance por camara: conteo actual y errores">
       <ResponsiveContainer width="100%" height={280}>
         <ComposedChart data={data} margin={{ top: 8, right: 10, left: 0, bottom: 10 }}>
           <CartesianGrid stroke="#e6edf2" strokeDasharray="3 3" />

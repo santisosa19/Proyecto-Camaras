@@ -5,13 +5,13 @@ from collections import defaultdict
 from datetime import date, datetime, time as dt_time, timedelta
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from app.database.connection import get_db
 from app.models.database import CameraStatus, CrossingEvent, Detection, Heatmap
-from app.security import require_authenticated_user
+from app.security import AuthenticatedUser, require_authenticated_user
 
 router = APIRouter(dependencies=[Depends(require_authenticated_user)])
 
@@ -65,6 +65,24 @@ def _camera_branch_info(camera: CameraStatus) -> tuple[str, str]:
     )
     branch_name = metadata.get("branch_name") or metadata.get("local_name") or branch_id
     return branch_id, branch_name
+
+
+def _filter_cameras_for_user(cameras: list[CameraStatus], current_user: AuthenticatedUser) -> list[CameraStatus]:
+    if current_user.role != "branch_manager":
+        return cameras
+    if not current_user.branch_id:
+        return []
+    return [camera for camera in cameras if _camera_branch_info(camera)[0] == current_user.branch_id]
+
+
+def _ensure_branch_access(branch_id: str, current_user: AuthenticatedUser) -> None:
+    if current_user.role != "branch_manager":
+        return
+    if current_user.branch_id != branch_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tenés permisos para acceder a esta sucursal",
+        )
 
 
 def _latest_counts_by_camera(db: Session, camera_ids: list[str]) -> dict[str, int]:
@@ -422,12 +440,13 @@ async def get_overview(
     start_date: date | None = Query(default=None),
     end_date: date | None = Query(default=None),
     top_branches: int = Query(default=5, ge=1, le=20),
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
     db: Session = Depends(get_db),
 ):
     """
     Resumen global para página principal del dashboard.
     """
-    cameras = db.query(CameraStatus).all()
+    cameras = _filter_cameras_for_user(db.query(CameraStatus).all(), current_user)
     camera_ids = [camera.camera_id for camera in cameras]
     since, until, resolved_start_date, resolved_end_date = _resolve_time_window(
         hours=hours,
@@ -480,12 +499,13 @@ async def list_branch_cards(
     q: str | None = Query(default=None, min_length=1),
     sort_by: Literal["name", "occupancy", "entries", "exits", "online_ratio"] = Query(default="name"),
     order: Literal["asc", "desc"] = Query(default="asc"),
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
     db: Session = Depends(get_db),
 ):
     """
     Tarjetas resumen por sucursal para vista global.
     """
-    cameras = db.query(CameraStatus).all()
+    cameras = _filter_cameras_for_user(db.query(CameraStatus).all(), current_user)
     camera_ids = [camera.camera_id for camera in cameras]
     latest_counts = _latest_counts_by_camera(db, camera_ids)
     today_start = datetime.combine(date.today(), datetime.min.time())
@@ -529,12 +549,15 @@ async def get_branch_detail(
     hours: int = Query(default=24, ge=1, le=168),
     start_date: date | None = Query(default=None),
     end_date: date | None = Query(default=None),
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
     db: Session = Depends(get_db)
 ):
     """
     Detalle de sucursal para dashboard.
     """
-    cameras = db.query(CameraStatus).all()
+    _ensure_branch_access(branch_id, current_user)
+
+    cameras = _filter_cameras_for_user(db.query(CameraStatus).all(), current_user)
     branch_cameras = [camera for camera in cameras if _camera_branch_info(camera)[0] == branch_id]
     camera_ids = [camera.camera_id for camera in branch_cameras]
     since, until, resolved_start_date, resolved_end_date = _resolve_time_window(
@@ -606,12 +629,15 @@ async def get_branch_heatmaps(
     branch_id: str,
     target_date: date | None = Query(default=None),
     hour: int | None = Query(default=None, ge=0, le=23),
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
     db: Session = Depends(get_db),
 ):
     """
     Heatmaps horarios por sucursal (uno por cámara para el slot seleccionado).
     """
-    cameras = db.query(CameraStatus).all()
+    _ensure_branch_access(branch_id, current_user)
+
+    cameras = _filter_cameras_for_user(db.query(CameraStatus).all(), current_user)
     branch_cameras = [camera for camera in cameras if _camera_branch_info(camera)[0] == branch_id]
     camera_ids = [camera.camera_id for camera in branch_cameras]
     branch_name = _camera_branch_info(branch_cameras[0])[1] if branch_cameras else branch_id

@@ -110,6 +110,7 @@ export function BranchDetailPage({ user }) {
   const exitsByGender = data.exits_by_gender || {};
   const normalizedRange = normalizeDateRange(dateRange.startDate, dateRange.endDate);
   const chartWindowHours = rangeWindowHours(normalizedRange.startDate, normalizedRange.endDate);
+  const chartGranularityLabel = chartWindowHours >= 168 ? "por dia" : "por hora";
 
   return (
     <section className="branch-detail-page">
@@ -133,7 +134,7 @@ export function BranchDetailPage({ user }) {
           </select>
         </div>
         <div className="updated-at">Actualizado: {formatDateTime(data.timestamp)}</div>
-        <div className="updated-at">Rango aplicado: {appliedRange.startDate} a {appliedRange.endDate}</div>
+        <div className="updated-at" aria-live="polite">Rango aplicado: {appliedRange.startDate} a {appliedRange.endDate}</div>
       </article>
 
       <div className="kpi-grid">
@@ -163,7 +164,7 @@ export function BranchDetailPage({ user }) {
         <div className="panel-header">
           <h3>Tendencia de trafico de la sucursal</h3>
           <p>
-            Flujo horario y ocupacion acumulada ({normalizedRange.startDate} a {normalizedRange.endDate})
+            Flujo y ocupacion acumulada {chartGranularityLabel} ({normalizedRange.startDate} a {normalizedRange.endDate})
           </p>
         </div>
         <TrafficChart series={data.hourly_flow || []} windowHours={chartWindowHours} />
@@ -230,16 +231,17 @@ export function BranchDetailPage({ user }) {
         </div>
         <div className="table-wrap">
           <table>
+            <caption className="sr-only">Tabla de camaras con estado, FPS, errores, conteo, entradas y salidas</caption>
             <thead>
               <tr>
-                <th>Camara</th>
-                <th>Estado</th>
-                <th>FPS</th>
-                <th>Errores</th>
-                <th>Conteo actual</th>
-                <th>Entradas</th>
-                <th>Salidas</th>
-                <th>Ultimo frame</th>
+                <th scope="col">Camara</th>
+                <th scope="col">Estado</th>
+                <th scope="col">FPS</th>
+                <th scope="col">Errores</th>
+                <th scope="col">Conteo actual</th>
+                <th scope="col">Entradas</th>
+                <th scope="col">Salidas</th>
+                <th scope="col">Ultimo frame</th>
               </tr>
             </thead>
             <tbody>

@@ -63,6 +63,7 @@ export function OverviewPage() {
   const onlineRatio = data.total_cameras ? Math.round((100 * data.online_cameras) / data.total_cameras) : 0;
   const normalizedRange = normalizeDateRange(dateRange.startDate, dateRange.endDate);
   const chartWindowHours = rangeWindowHours(normalizedRange.startDate, normalizedRange.endDate);
+  const chartGranularityLabel = chartWindowHours >= 168 ? "por dia" : "por hora";
 
   return (
     <section className="dashboard-grid">
@@ -85,7 +86,7 @@ export function OverviewPage() {
           </select>
         </div>
         <div className="updated-at">Actualizado: {formatDateTime(data.timestamp)}</div>
-        <div className="updated-at">Rango aplicado: {appliedRange.startDate} a {appliedRange.endDate}</div>
+        <div className="updated-at" aria-live="polite">Rango aplicado: {appliedRange.startDate} a {appliedRange.endDate}</div>
       </article>
 
       <div className="kpi-grid">
@@ -105,7 +106,7 @@ export function OverviewPage() {
         <div className="panel-header">
           <h3>Tendencia de trafico y ocupacion</h3>
           <p>
-            Entradas, salidas y ocupacion acumulada por hora ({normalizedRange.startDate} a {normalizedRange.endDate})
+            Entradas, salidas y ocupacion acumulada {chartGranularityLabel} ({normalizedRange.startDate} a {normalizedRange.endDate})
           </p>
         </div>
         <TrafficChart series={data.flow_series || []} windowHours={chartWindowHours} />

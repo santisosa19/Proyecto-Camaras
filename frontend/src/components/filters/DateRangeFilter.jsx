@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { DayPicker } from "react-day-picker";
 import "react-day-picker/style.css";
 
@@ -25,6 +25,7 @@ export function DateRangeFilter({ startDate, endDate, onChange }) {
   const [isOpen, setIsOpen] = useState(false);
   const [draftRange, setDraftRange] = useState({ from: undefined, to: undefined });
   const containerRef = useRef(null);
+  const popoverId = useId();
 
   const selected = useMemo(() => {
     if (isOpen) {
@@ -76,20 +77,39 @@ export function DateRangeFilter({ startDate, endDate, onChange }) {
       }
     };
 
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setIsOpen(false);
+      }
+    };
+
     document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
     return () => {
       document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
     };
   }, [isOpen]);
 
+  const triggerLabel = rangeLabel(startDate, endDate);
+  const canApply = Boolean(draftRange.from);
+
   return (
     <div className="date-range-filter" ref={containerRef}>
-      <button type="button" className="date-range-trigger" onClick={handleToggle}>
-        {rangeLabel(startDate, endDate)}
+      <button
+        type="button"
+        className="date-range-trigger"
+        onClick={handleToggle}
+        aria-label={`Rango de fechas seleccionado: ${triggerLabel}`}
+        aria-haspopup="dialog"
+        aria-expanded={isOpen}
+        aria-controls={popoverId}
+      >
+        {triggerLabel}
       </button>
       {isOpen ? (
-        <div className="date-range-popover">
-          <DayPicker mode="range" min={1} selected={selected} onSelect={handleSelect} numberOfMonths={1} />
+        <div className="date-range-popover" id={popoverId} role="dialog" aria-label="Selector de rango de fechas">
+          <DayPicker mode="range" min={0} selected={selected} onSelect={handleSelect} numberOfMonths={1} />
           <div className="date-range-actions">
             <button type="button" className="date-range-btn secondary" onClick={handleClear}>
               Limpiar
@@ -97,7 +117,7 @@ export function DateRangeFilter({ startDate, endDate, onChange }) {
             <button type="button" className="date-range-btn secondary" onClick={handleCancel}>
               Cancelar
             </button>
-            <button type="button" className="date-range-btn" onClick={handleApply}>
+            <button type="button" className="date-range-btn" onClick={handleApply} disabled={!canApply}>
               Aplicar
             </button>
           </div>

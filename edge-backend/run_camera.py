@@ -47,6 +47,23 @@ from app.services.apparent_gender import ApparentGenderEstimator
 LINES_CONFIG_FILE = Path(__file__).parent / "lines_config.json"
 
 
+def env_str(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name, "true" if default else "false").strip().lower()
+    return raw in {"1", "true", "t", "yes", "y", "on"}
+
+
+def env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} debe ser un entero válido. Valor recibido: '{raw}'") from exc
+
+
 def sanitize_rtsp_url(url: str) -> str:
     """
     Oculta credenciales en logs de URLs RTSP/HTTP.
@@ -1042,7 +1059,13 @@ class TrafficAnalysisSystem:
 
     def _build_crossing_event_metadata(self, event: dict) -> dict:
         """Construir metadata enriquecida para un evento de cruce."""
-        metadata = {"position": event.get("position")}
+        metadata = {
+            "position": event.get("position"),
+            "camera_id": self.camera_id,
+            "camera_name": self.camera_name,
+            "branch_id": self.branch_id or None,
+            "branch_name": self.branch_name or None,
+        }
         track_id = event.get("track_id")
         if track_id is None:
             return metadata
@@ -1211,22 +1234,29 @@ def main():
     
     # Configuración de la cámara
     CAMERA_CONFIG = {
-        'camera_id': os.getenv('CAMERA_ID', 'camara_default').strip(),
-        'camera_name': os.getenv('CAMERA_ID', 'Camara Default').strip(),
-        'rtsp_url': os.getenv('CAMERA_RTSP_URL', '').strip(),
+        'camera_id': env_str('CAMERA_ID', 'camara_default'),
+        'camera_name': env_str('CAMERA_NAME', 'Camara Default'),
+        'rtsp_url': env_str('CAMERA_RTSP_URL', ''),
         'entry_direction': 'positive',  # positive = entra, negative = sale
-        'show_window': os.getenv('SHOW_WINDOW', 'false').lower() == 'true',
-        'save_to_db': os.getenv('SAVE_TO_DB', 'false').lower() == 'true',
-        'save_to_api': os.getenv('SAVE_TO_API', 'false').lower() == 'true',
-        'remote_api_base_url': os.getenv('REMOTE_API_BASE_URL', ''),
-        'remote_api_key': os.getenv('REMOTE_API_KEY', ''),
-        'max_ingest_queue_size': int(os.getenv('MAX_INGEST_QUEUE_SIZE', '10000')),
-        'branch_id': os.getenv('BRANCH_ID', ''),
-        'branch_name': os.getenv('BRANCH_NAME', ''),
+        'show_window': env_bool('SHOW_WINDOW', False),
+        'save_to_db': env_bool('SAVE_TO_DB', False),
+        'save_to_api': env_bool('SAVE_TO_API', False),
+        'remote_api_base_url': env_str('REMOTE_API_BASE_URL', ''),
+        'remote_api_key': env_str('REMOTE_API_KEY', ''),
+        'max_ingest_queue_size': env_int('MAX_INGEST_QUEUE_SIZE', 10000),
+        'branch_id': env_str('BRANCH_ID', ''),
+        'branch_name': env_str('BRANCH_NAME', ''),
     }
 
+    if not CAMERA_CONFIG['camera_id']:
+        raise ValueError("CAMERA_ID es obligatorio")
+    if not CAMERA_CONFIG['camera_name']:
+        raise ValueError("CAMERA_NAME es obligatorio")
     if not CAMERA_CONFIG['rtsp_url']:
         raise ValueError("CAMERA_RTSP_URL es obligatorio")
+
+    if CAMERA_CONFIG['save_to_api'] and not CAMERA_CONFIG['remote_api_base_url']:
+        raise ValueError("REMOTE_API_BASE_URL es obligatorio cuando SAVE_TO_API=true")
     
     logger.info("=" * 60)
     logger.info("TRAFFIC ANALYSIS SYSTEM - Marathon SRL")
