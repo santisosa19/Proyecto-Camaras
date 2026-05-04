@@ -173,6 +173,10 @@ services:
       CAMERA_ID: ${CAMERA_ID:-camara_prueba_marathon}
       CAMERA_NAME: ${CAMERA_NAME:-Camara de Prueba Marathon}
       CAMERA_RTSP_URL: ${CAMERA_RTSP_URL:-}
+      ENTRY_DIRECTION: ${ENTRY_DIRECTION:-positive}
+      ENTRY_DIRECTION_FORCE: ${ENTRY_DIRECTION_FORCE:-false}
+      EDGE_ID: ${EDGE_ID:-edge_001}
+      PAYLOAD_VERSION: ${PAYLOAD_VERSION:-1.0}
       SAVE_TO_DB: ${SAVE_TO_DB:-false}
       SAVE_TO_API: ${SAVE_TO_API:-true}
       REMOTE_API_BASE_URL: ${REMOTE_API_BASE_URL:-http://server-backend:8000}

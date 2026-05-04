@@ -5,7 +5,7 @@ from datetime import datetime, time
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -33,7 +33,24 @@ def _authorize_ingest(
         )
 
 
-class CrossingIngestItem(BaseModel):
+class IngestBaseModel(BaseModel):
+    payload_version: str = "1.0"
+    edge_id: str | None = None
+
+    @field_validator("payload_version", mode="before")
+    @classmethod
+    def _normalize_payload_version(cls, value: Any) -> str:
+        raw = str(value or "").strip()
+        return raw or "1.0"
+
+    @field_validator("edge_id", mode="before")
+    @classmethod
+    def _normalize_edge_id(cls, value: Any) -> str | None:
+        raw = str(value or "").strip()
+        return raw or None
+
+
+class CrossingIngestItem(IngestBaseModel):
     camera_id: str
     line_name: str = "main_gate"
     direction: Literal["positive", "negative"]
@@ -42,12 +59,20 @@ class CrossingIngestItem(BaseModel):
     timestamp: datetime | None = None
     event_metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("camera_id", "line_name", mode="before")
+    @classmethod
+    def _clean_required_strings(cls, value: Any) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            raise ValueError("campo obligatorio vacío")
+        return raw
+
 
 class CrossingIngestRequest(BaseModel):
     events: list[CrossingIngestItem]
 
 
-class DetectionSnapshotItem(BaseModel):
+class DetectionSnapshotItem(IngestBaseModel):
     camera_id: str
     camera_name: str | None = None
     rtsp_url: str | None = None
@@ -61,12 +86,20 @@ class DetectionSnapshotItem(BaseModel):
     total_frames: int | None = None
     error_count: int | None = None
 
+    @field_validator("camera_id", mode="before")
+    @classmethod
+    def _clean_camera_id(cls, value: Any) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            raise ValueError("camera_id es obligatorio")
+        return raw
+
 
 class DetectionSnapshotRequest(BaseModel):
     items: list[DetectionSnapshotItem]
 
 
-class HeatmapIngestItem(BaseModel):
+class HeatmapIngestItem(IngestBaseModel):
     camera_id: str
     camera_name: str | None = None
     branch_id: str | None = None
@@ -81,6 +114,14 @@ class HeatmapIngestItem(BaseModel):
     background_image_base64: str | None = None
     overlay_png_base64: str | None = None
     is_partial: bool = False
+
+    @field_validator("camera_id", mode="before")
+    @classmethod
+    def _clean_heatmap_camera_id(cls, value: Any) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            raise ValueError("camera_id es obligatorio")
+        return raw
 
 
 class HeatmapIngestRequest(BaseModel):
@@ -100,10 +141,18 @@ async def ingest_crossings(
         return {"inserted": 0}
 
     try:
-        rows = [item.model_dump() for item in payload.events]
-        for row in rows:
+        rows = []
+        for item in payload.events:
+            row = item.model_dump()
             if row.get("timestamp") is None:
                 row["timestamp"] = datetime.utcnow()
+            event_metadata = row.get("event_metadata") if isinstance(row.get("event_metadata"), dict) else {}
+            if item.payload_version:
+                event_metadata["payload_version"] = item.payload_version
+            if item.edge_id:
+                event_metadata["edge_id"] = item.edge_id
+            row["event_metadata"] = event_metadata
+            rows.append(row)
 
         saved = DatabaseManager.save_crossing_events(db=db, events=rows)
         return {"inserted": len(saved)}
@@ -172,6 +221,10 @@ async def ingest_detections(
                 existing_meta["branch_id"] = item.branch_id
             if item.branch_name:
                 existing_meta["branch_name"] = item.branch_name
+            if item.payload_version:
+                existing_meta["last_payload_version"] = item.payload_version
+            if item.edge_id:
+                existing_meta["edge_id"] = item.edge_id
             if existing_meta:
                 status_row.camera_metadata = existing_meta
             status_row.last_frame_at = effective_ts
@@ -265,6 +318,10 @@ async def ingest_heatmaps(
                 existing_meta["branch_id"] = item.branch_id
             if item.branch_name:
                 existing_meta["branch_name"] = item.branch_name
+            if item.payload_version:
+                existing_meta["last_payload_version"] = item.payload_version
+            if item.edge_id:
+                existing_meta["edge_id"] = item.edge_id
             if existing_meta:
                 status_row.camera_metadata = existing_meta
             status_row.updated_at = datetime.utcnow()

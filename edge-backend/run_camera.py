@@ -438,9 +438,9 @@ class TrafficAnalysisSystem:
         self.camera_id = camera_id
         self.camera_name = camera_name
         self.rtsp_url = rtsp_url
-        if entry_direction not in {"positive", "negative"}:
-            raise ValueError("entry_direction debe ser 'positive' o 'negative'")
-        self.entry_direction = entry_direction
+        self.entry_direction = self._normalize_entry_direction(entry_direction)
+        self.edge_id = env_str("EDGE_ID", camera_id)
+        self.payload_version = env_str("PAYLOAD_VERSION", "1.0")
         self.show_window = show_window
         self.save_to_db = save_to_db
         self.save_to_api = save_to_api
@@ -482,6 +482,7 @@ class TrafficAnalysisSystem:
         )
         self.last_heatmap_background_update = 0.0
         self.latest_heatmap_background_base64: str | None = None
+        self.entry_direction_force = env_bool("ENTRY_DIRECTION_FORCE", False)
         
         # Estadísticas
         self.stats = {
@@ -494,6 +495,13 @@ class TrafficAnalysisSystem:
         
         # Inicializar componentes
         self._init_components()
+
+    @staticmethod
+    def _normalize_entry_direction(value: str) -> str:
+        normalized = (value or "").strip().lower()
+        if normalized not in {"positive", "negative"}:
+            raise ValueError("entry_direction debe ser 'positive' o 'negative'")
+        return normalized
     
     def _init_components(self):
         """Inicializar todos los componentes"""
@@ -579,7 +587,15 @@ class TrafficAnalysisSystem:
                     direction="both"
                 )
             else:
-                self.entry_direction = loaded_config.get("entry_direction", "positive")
+                loaded_entry_direction = loaded_config.get("entry_direction", "positive")
+                if self.entry_direction_force:
+                    logger.info(
+                        "ENTRY_DIRECTION_FORCE activo: se mantiene '%s' y se ignora '%s' de lines_config.json",
+                        self.entry_direction,
+                        loaded_entry_direction,
+                    )
+                else:
+                    self.entry_direction = self._normalize_entry_direction(loaded_entry_direction)
                 self.lines_config = loaded_config.get("lines", [])
                 # Usar configuración guardada
                 for line_config in self.lines_config:
@@ -814,6 +830,7 @@ class TrafficAnalysisSystem:
                         f"FPS: {fps:.1f}",
                         f"Detectados: {len(detections)}",
                         f"Tracks activos: {count_stats['active_tracks']}",
+                        f"ENTRADA => {self.entry_direction.upper()}",
                     ]
                     
                     # Agregar conteos de todas las líneas
@@ -970,7 +987,10 @@ class TrafficAnalysisSystem:
             with get_db_context() as db:
                 rows = []
                 for event in crossing_events:
-                    direction = event.get('direction')
+                    direction = (event.get('direction') or '').strip().lower()
+                    if direction not in {"positive", "negative"}:
+                        logger.warning("Evento de cruce con dirección inválida: %s", event)
+                        continue
                     is_entry = direction == self.entry_direction
                     event_type = "entry" if is_entry else "exit"
                     event_ts = datetime.fromisoformat(event['timestamp'])
@@ -997,7 +1017,10 @@ class TrafficAnalysisSystem:
 
         rows = []
         for event in crossing_events:
-            direction = event.get('direction')
+            direction = (event.get('direction') or '').strip().lower()
+            if direction not in {"positive", "negative"}:
+                logger.warning("Evento de cruce con dirección inválida (ingesta remota): %s", event)
+                continue
             is_entry = direction == self.entry_direction
             event_type = "entry" if is_entry else "exit"
             rows.append(
@@ -1008,7 +1031,9 @@ class TrafficAnalysisSystem:
                     "event_type": event_type,
                     "track_id": event.get('track_id'),
                     "event_metadata": self._build_crossing_event_metadata(event),
-                    "timestamp": event.get('timestamp')
+                    "timestamp": event.get('timestamp'),
+                    "edge_id": self.edge_id,
+                    "payload_version": self.payload_version,
                 }
             )
 
@@ -1036,6 +1061,8 @@ class TrafficAnalysisSystem:
             "fps": self.stats['frames_processed'] / (time.time() - self.stats['start_time']),
             "total_frames": self.stats['frames_processed'],
             "error_count": capture_stats.get('error_count', 0),
+            "edge_id": self.edge_id,
+            "payload_version": self.payload_version,
         }
         self.remote_ingest.enqueue_detection(payload)
 
@@ -1065,6 +1092,9 @@ class TrafficAnalysisSystem:
             "camera_name": self.camera_name,
             "branch_id": self.branch_id or None,
             "branch_name": self.branch_name or None,
+            "entry_direction_config": self.entry_direction,
+            "edge_id": self.edge_id,
+            "payload_version": self.payload_version,
         }
         track_id = event.get("track_id")
         if track_id is None:
@@ -1146,6 +1176,8 @@ class TrafficAnalysisSystem:
             "background_image_base64": self.latest_heatmap_background_base64,
             "overlay_png_base64": overlay_png_base64,
             "is_partial": is_partial,
+            "edge_id": self.edge_id,
+            "payload_version": self.payload_version,
         }
         self.remote_ingest.enqueue_heatmap(payload)
     
@@ -1173,7 +1205,15 @@ class TrafficAnalysisSystem:
         loaded_config = load_lines_configuration(self.camera_id)
         
         if loaded_config:
-            self.entry_direction = loaded_config.get("entry_direction", "positive")
+            loaded_entry_direction = loaded_config.get("entry_direction", "positive")
+            if self.entry_direction_force:
+                logger.info(
+                    "ENTRY_DIRECTION_FORCE activo tras recarga: se mantiene '%s' y se ignora '%s'",
+                    self.entry_direction,
+                    loaded_entry_direction,
+                )
+            else:
+                self.entry_direction = self._normalize_entry_direction(loaded_entry_direction)
             self.lines_config = loaded_config.get("lines", [])
             for line_config in self.lines_config:
                 self.counter.add_line(
@@ -1237,7 +1277,7 @@ def main():
         'camera_id': env_str('CAMERA_ID', 'camara_default'),
         'camera_name': env_str('CAMERA_NAME', 'Camara Default'),
         'rtsp_url': env_str('CAMERA_RTSP_URL', ''),
-        'entry_direction': 'positive',  # positive = entra, negative = sale
+        'entry_direction': env_str('ENTRY_DIRECTION', 'positive'),
         'show_window': env_bool('SHOW_WINDOW', False),
         'save_to_db': env_bool('SAVE_TO_DB', False),
         'save_to_api': env_bool('SAVE_TO_API', False),

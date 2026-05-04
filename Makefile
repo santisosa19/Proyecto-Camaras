@@ -1,6 +1,6 @@
 .PHONY: help install-server install-edge install-frontend run-server run-edge \
 \tdocker-config docker-build docker-up docker-up-workers docker-up-edge \
-\tdocker-down docker-logs health check-server clean
+\tdocker-down docker-logs health check-server check-edge check-frontend verify clean
 
 help:
 	@echo "Traffic Analysis System - comandos disponibles:"
@@ -19,6 +19,9 @@ help:
 	@echo "  make docker-logs       - Ver logs"
 	@echo "  make health            - Consultar health de la API"
 	@echo "  make check-server      - Validación sintáctica del backend central"
+	@echo "  make check-edge        - Validación sintáctica del backend edge"
+	@echo "  make check-frontend    - Build de frontend"
+	@echo "  make verify            - Ejecuta check-server + check-edge + check-frontend"
 	@echo ""
 
 install-server:
@@ -62,6 +65,14 @@ health:
 
 check-server:
 	python3 -m compileall server-backend/app
+
+check-edge:
+	python3 -m compileall edge-backend/app edge-backend/run_camera.py
+
+check-frontend:
+	cd frontend && npm run build
+
+verify: check-server check-edge check-frontend
 
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
