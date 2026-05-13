@@ -216,7 +216,7 @@ class OccupancyHeatmap:
         return (norm * 255).astype(np.uint8)
 
     def render_overlay(self, frame: np.ndarray) -> np.ndarray:
-        if self.grid is None:
+        if frame is None or self.grid is None:
             return frame
 
         heat_u8 = self._build_normalized_heat()
@@ -234,13 +234,23 @@ class OccupancyHeatmap:
         output = frame.copy()
 
         mask = heat_u8 > self.overlay_min_intensity
-        output[mask] = cv2.addWeighted(
-            frame[mask],
-            1.0 - self.overlay_alpha,
-            colored[mask],
-            self.overlay_alpha,
-            0.0,
-        )
+        if not np.any(mask):
+            return output
+
+        try:
+            output[mask] = cv2.addWeighted(
+                frame[mask],
+                1.0 - self.overlay_alpha,
+                colored[mask],
+                self.overlay_alpha,
+                0.0,
+            )
+        except Exception as exc:
+            logger.debug("Fallback blend para heatmap overlay por error en cv2.addWeighted: %s", exc)
+            base = frame[mask].astype(np.float32)
+            overlay = colored[mask].astype(np.float32)
+            alpha = float(self.overlay_alpha)
+            output[mask] = np.clip((1.0 - alpha) * base + alpha * overlay, 0, 255).astype(np.uint8)
         return output
 
     def export_overlay_png_base64(self) -> Optional[str]:

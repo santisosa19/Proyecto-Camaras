@@ -109,7 +109,7 @@ class PersonCounter:
     Contador de personas basado en líneas virtuales
     """
     
-    def __init__(self, camera_id: str):
+    def __init__(self, camera_id : str):
         """
         Args:
             camera_id: Identificador de la cámara
