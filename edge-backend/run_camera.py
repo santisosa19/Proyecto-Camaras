@@ -93,6 +93,7 @@ class LineConfigurator:
         self.points = []
         self.lines = []
         self.current_frame = None
+        self.window_name = "Line Configuration"
         
     def configure(self):
         """Modo interactivo de configuración"""
@@ -109,9 +110,19 @@ class LineConfigurator:
         logger.info("  6. Presiona 'q' para SALIR sin guardar")
         logger.info("="*60)
         
-        # Configurar callback del mouse
-        cv2.namedWindow("Configuración de Líneas")
-        cv2.setMouseCallback("Configuración de Líneas", self._mouse_callback)
+        # Configurar callback del mouse en una sola ventana con título ASCII.
+        # En sesiones remotas de Windows (AnyDesk/RDP), títulos con acentos
+        # pueden terminar creando ventanas duplicadas y perder eventos de click.
+        try:
+            cv2.destroyWindow(self.window_name)
+        except cv2.error:
+            pass
+        try:
+            cv2.destroyWindow("Configuración de Líneas")
+        except cv2.error:
+            pass
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        cv2.setMouseCallback(self.window_name, self._mouse_callback)
         
         while True:
             # Capturar frame
@@ -170,7 +181,7 @@ class LineConfigurator:
                 2
             )
             
-            cv2.imshow("Configuración de Líneas", display_frame)
+            cv2.imshow(self.window_name, display_frame)
             
             # Manejar teclas
             key = cv2.waitKey(1) & 0xFF
@@ -179,7 +190,7 @@ class LineConfigurator:
                 if len(self.lines) >= 1:
                     self._save_configuration()
                     logger.info("✓ Configuración guardada")
-                    cv2.destroyWindow("Configuración de Líneas")
+                    cv2.destroyWindow(self.window_name)
                     return self.lines
                 else:
                     logger.warning("⚠ Configura al menos una línea antes de guardar")
@@ -195,7 +206,7 @@ class LineConfigurator:
             
             elif key == ord('q'):  # Salir sin guardar
                 logger.info("Saliendo sin guardar configuración")
-                cv2.destroyWindow("Configuración de Líneas")
+                cv2.destroyWindow(self.window_name)
                 return None
     
     def _mouse_callback(self, event, x, y, flags, param):
