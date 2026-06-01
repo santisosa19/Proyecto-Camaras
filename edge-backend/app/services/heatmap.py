@@ -9,7 +9,7 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -29,10 +29,16 @@ class OccupancyHeatmap:
         overlay_alpha: float = 0.35,
         blur_kernel: int = 21,
         decay_per_second: float = 0.0,
-        min_nonzero_intensity: int = 0,
-        monotonic_render: bool = False,
         output_dir: str = "heatmaps",
         metadata: Optional[Dict] = None,
+        trail_enabled: bool = True,
+        trail_stale_seconds: float = 2.5,
+        min_sample_weight: float = 0.02,
+        normalization_percentile: float = 99.0,
+        normalization_rise_alpha: float = 0.08,
+        normalization_fall_alpha: float = 0.01,
+        normalization_gamma: float = 0.85,
+        overlay_min_intensity: int = 1,
     ):
         self.camera_id = camera_id
         self.cell_size = max(4, int(cell_size))
@@ -41,13 +47,18 @@ class OccupancyHeatmap:
         if self.blur_kernel % 2 == 0:
             self.blur_kernel += 1
         self.decay_per_second = max(0.0, float(decay_per_second))
-        self.min_nonzero_intensity = int(np.clip(int(min_nonzero_intensity), 0, 255))
-        self.monotonic_render = bool(monotonic_render)
         self.output_dir = Path(output_dir)
         self.metadata = metadata or {}
+        self.trail_enabled = bool(trail_enabled)
+        self.trail_stale_seconds = max(0.5, float(trail_stale_seconds))
+        self.min_sample_weight = max(1e-3, float(min_sample_weight))
+        self.normalization_percentile = float(np.clip(normalization_percentile, 90.0, 100.0))
+        self.normalization_rise_alpha = float(np.clip(normalization_rise_alpha, 0.01, 1.0))
+        self.normalization_fall_alpha = float(np.clip(normalization_fall_alpha, 0.001, 1.0))
+        self.normalization_gamma = float(np.clip(normalization_gamma, 0.5, 2.0))
+        self.overlay_min_intensity = max(0, min(255, int(overlay_min_intensity)))
 
         self.grid: Optional[np.ndarray] = None
-        self._peak_render_u8: Optional[np.ndarray] = None
         self.grid_h = 0
         self.grid_w = 0
         self.frame_w = 0
@@ -55,6 +66,19 @@ class OccupancyHeatmap:
         self.total_samples = 0
         self.total_weight = 0.0
         self.last_update_ts: Optional[float] = None
+        self.render_reference_value = 0.0
+        self.track_last_cell: Dict[int, Tuple[int, int]] = {}
+        self.track_last_seen_ts: Dict[int, float] = {}
+
+    def _evict_stale_tracks(self, now_ts: float):
+        stale_ids = [
+            track_id
+            for track_id, seen_ts in self.track_last_seen_ts.items()
+            if (now_ts - seen_ts) > self.trail_stale_seconds
+        ]
+        for track_id in stale_ids:
+            self.track_last_seen_ts.pop(track_id, None)
+            self.track_last_cell.pop(track_id, None)
 
     def _ensure_grid(self, frame_shape: tuple[int, int, int] | tuple[int, int]):
         frame_h, frame_w = frame_shape[:2]
@@ -87,10 +111,12 @@ class OccupancyHeatmap:
     def reset(self):
         if self.grid is not None:
             self.grid.fill(0.0)
-        self._peak_render_u8 = None
         self.total_samples = 0
         self.total_weight = 0.0
         self.last_update_ts = None
+        self.render_reference_value = 0.0
+        self.track_last_cell.clear()
+        self.track_last_seen_ts.clear()
 
     def update(
         self,
@@ -114,6 +140,7 @@ class OccupancyHeatmap:
             self.grid *= decay
 
         if not detections:
+            self._evict_stale_tracks(now)
             return
 
         for det in detections:
@@ -124,10 +151,28 @@ class OccupancyHeatmap:
             cell_y = min(self.grid_h - 1, y // self.cell_size)
 
             conf_weight = float(np.clip(det.confidence, 0.1, 1.0))
-            weight = conf_weight * max(delta_t, 1e-3)
+            weight = max(self.min_sample_weight, conf_weight * max(delta_t, 1e-3))
             self.grid[cell_y, cell_x] += weight
+
+            if self.trail_enabled and det.track_id is not None:
+                track_id = int(det.track_id)
+                prev_cell = self.track_last_cell.get(track_id)
+                if prev_cell is not None and prev_cell != (cell_x, cell_y):
+                    cv2.line(
+                        self.grid,
+                        prev_cell,
+                        (cell_x, cell_y),
+                        color=float(weight * 0.7),
+                        thickness=1,
+                        lineType=cv2.LINE_AA,
+                    )
+                self.track_last_cell[track_id] = (cell_x, cell_y)
+                self.track_last_seen_ts[track_id] = now
+
             self.total_samples += 1
             self.total_weight += weight
+
+        self._evict_stale_tracks(now)
 
     def _build_normalized_heat(self) -> Optional[np.ndarray]:
         if self.grid is None:
@@ -146,27 +191,32 @@ class OccupancyHeatmap:
         if non_zero.size == 0:
             return None
 
-        high = float(np.percentile(non_zero, 99))
+        high = float(np.percentile(non_zero, self.normalization_percentile))
         if high <= 0:
             return None
 
-        norm = np.clip(heat / high, 0.0, 1.0)
-        if self.min_nonzero_intensity > 0:
-            min_norm = self.min_nonzero_intensity / 255.0
-            positive_mask = heat > 0
-            norm[positive_mask] = np.maximum(norm[positive_mask], min_norm)
-        heat_u8 = (norm * 255).astype(np.uint8)
-        if not self.monotonic_render:
-            return heat_u8
-
-        if self._peak_render_u8 is None or self._peak_render_u8.shape != heat_u8.shape:
-            self._peak_render_u8 = heat_u8.copy()
+        if self.render_reference_value <= 0:
+            self.render_reference_value = high
+        elif high >= self.render_reference_value:
+            alpha = self.normalization_rise_alpha
+            self.render_reference_value = (
+                (1.0 - alpha) * self.render_reference_value + alpha * high
+            )
         else:
-            self._peak_render_u8 = np.maximum(self._peak_render_u8, heat_u8)
-        return self._peak_render_u8
+            alpha = self.normalization_fall_alpha
+            self.render_reference_value = (
+                (1.0 - alpha) * self.render_reference_value + alpha * high
+            )
+
+        stable_reference = max(self.render_reference_value, 1e-6)
+
+        norm = np.clip(heat / stable_reference, 0.0, 1.0)
+        if self.normalization_gamma != 1.0:
+            norm = np.power(norm, self.normalization_gamma)
+        return (norm * 255).astype(np.uint8)
 
     def render_overlay(self, frame: np.ndarray) -> np.ndarray:
-        if self.grid is None:
+        if frame is None or self.grid is None:
             return frame
 
         heat_u8 = self._build_normalized_heat()
@@ -183,14 +233,24 @@ class OccupancyHeatmap:
         colored = cv2.applyColorMap(heat_u8, cv2.COLORMAP_JET)
         output = frame.copy()
 
-        mask = heat_u8 > 3
-        output[mask] = cv2.addWeighted(
-            frame[mask],
-            1.0 - self.overlay_alpha,
-            colored[mask],
-            self.overlay_alpha,
-            0.0,
-        )
+        mask = heat_u8 > self.overlay_min_intensity
+        if not np.any(mask):
+            return output
+
+        try:
+            output[mask] = cv2.addWeighted(
+                frame[mask],
+                1.0 - self.overlay_alpha,
+                colored[mask],
+                self.overlay_alpha,
+                0.0,
+            )
+        except Exception as exc:
+            logger.debug("Fallback blend para heatmap overlay por error en cv2.addWeighted: %s", exc)
+            base = frame[mask].astype(np.float32)
+            overlay = colored[mask].astype(np.float32)
+            alpha = float(self.overlay_alpha)
+            output[mask] = np.clip((1.0 - alpha) * base + alpha * overlay, 0, 255).astype(np.uint8)
         return output
 
     def export_overlay_png_base64(self) -> Optional[str]:
@@ -211,10 +271,6 @@ class OccupancyHeatmap:
 
         colored = cv2.applyColorMap(heat_u8, cv2.COLORMAP_JET)  # BGR
         alpha = np.clip((heat_u8.astype(np.float32) / 255.0) * 220.0, 0, 255).astype(np.uint8)
-        if self.min_nonzero_intensity > 0:
-            positive_mask = heat_u8 > 0
-            alpha_floor = np.uint8(np.clip(self.min_nonzero_intensity, 0, 255))
-            alpha[positive_mask] = np.maximum(alpha[positive_mask], alpha_floor)
         bgra = np.dstack((colored, alpha))
         ok, encoded = cv2.imencode(".png", bgra)
         if not ok:

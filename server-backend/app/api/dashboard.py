@@ -2,21 +2,64 @@
 API Router - Dashboard multi-sucursal
 """
 from collections import defaultdict
-from datetime import date, datetime, time as dt_time, timedelta
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from app.database.connection import get_db
 from app.models.database import CameraStatus, CrossingEvent, Detection, Heatmap
+from app.security import AuthenticatedUser, require_authenticated_user
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_authenticated_user)])
+
+OFFLINE_AFTER_MINUTES = 30
 
 
 def _utcnow() -> datetime:
     return datetime.utcnow()
+
+
+def _to_iso_utc(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        aware = value.replace(tzinfo=timezone.utc)
+    else:
+        aware = value.astimezone(timezone.utc)
+    return aware.isoformat().replace("+00:00", "Z")
+
+
+def _is_camera_effectively_online(camera: CameraStatus, now: datetime) -> bool:
+    if not camera.is_connected or camera.last_frame_at is None:
+        return False
+    age = now - camera.last_frame_at
+    return age <= timedelta(minutes=OFFLINE_AFTER_MINUTES)
+
+
+def _resolve_time_window(
+    hours: int,
+    start_date: date | None,
+    end_date: date | None,
+) -> tuple[datetime, datetime, date, date]:
+    if start_date is None and end_date is None:
+        since = _utcnow() - timedelta(hours=hours)
+        until = _utcnow()
+        return since, until, since.date(), until.date()
+
+    if start_date is None:
+        start_date = end_date
+    if end_date is None:
+        end_date = start_date
+
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
+    since = datetime.combine(start_date, datetime.min.time())
+    until = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
+    return since, until, start_date, end_date
 
 
 def _empty_gender_bucket() -> dict[str, int]:
@@ -41,6 +84,24 @@ def _camera_branch_info(camera: CameraStatus) -> tuple[str, str]:
     )
     branch_name = metadata.get("branch_name") or metadata.get("local_name") or branch_id
     return branch_id, branch_name
+
+
+def _filter_cameras_for_user(cameras: list[CameraStatus], current_user: AuthenticatedUser) -> list[CameraStatus]:
+    if current_user.role != "branch_manager":
+        return cameras
+    if not current_user.branch_id:
+        return []
+    return [camera for camera in cameras if _camera_branch_info(camera)[0] == current_user.branch_id]
+
+
+def _ensure_branch_access(branch_id: str, current_user: AuthenticatedUser) -> None:
+    if current_user.role != "branch_manager":
+        return
+    if current_user.branch_id != branch_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tenés permisos para acceder a esta sucursal",
+        )
 
 
 def _latest_counts_by_camera(db: Session, camera_ids: list[str]) -> dict[str, int]:
@@ -79,12 +140,15 @@ def _latest_counts_by_camera(db: Session, camera_ids: list[str]) -> dict[str, in
     return result
 
 
-def _crossings_today_by_camera(db: Session, camera_ids: list[str]) -> dict[str, dict[str, int]]:
+def _crossings_in_range_by_camera(
+    db: Session,
+    camera_ids: list[str],
+    since: datetime,
+    until: datetime,
+) -> dict[str, dict[str, int]]:
     if not camera_ids:
         return {}
 
-    start = datetime.combine(date.today(), datetime.min.time())
-    end = start + timedelta(days=1)
     rows = (
         db.query(
             CrossingEvent.camera_id,
@@ -93,8 +157,8 @@ def _crossings_today_by_camera(db: Session, camera_ids: list[str]) -> dict[str, 
         )
         .filter(
             CrossingEvent.camera_id.in_(camera_ids),
-            CrossingEvent.timestamp >= start,
-            CrossingEvent.timestamp < end,
+            CrossingEvent.timestamp >= since,
+            CrossingEvent.timestamp < until,
         )
         .group_by(CrossingEvent.camera_id, CrossingEvent.event_type)
         .all()
@@ -108,9 +172,11 @@ def _crossings_today_by_camera(db: Session, camera_ids: list[str]) -> dict[str, 
     return result
 
 
-def _crossings_today_with_gender_by_camera(
+def _crossings_in_range_with_gender_by_camera(
     db: Session,
     camera_ids: list[str],
+    since: datetime,
+    until: datetime,
 ) -> tuple[dict[str, dict[str, int]], dict[str, dict[str, dict[str, int]]]]:
     if not camera_ids:
         return {}, {}
@@ -121,8 +187,6 @@ def _crossings_today_with_gender_by_camera(
         for camera_id in camera_ids
     }
 
-    start = datetime.combine(date.today(), datetime.min.time())
-    end = start + timedelta(days=1)
     rows = (
         db.query(
             CrossingEvent.camera_id,
@@ -131,8 +195,8 @@ def _crossings_today_with_gender_by_camera(
         )
         .filter(
             CrossingEvent.camera_id.in_(camera_ids),
-            CrossingEvent.timestamp >= start,
-            CrossingEvent.timestamp < end,
+            CrossingEvent.timestamp >= since,
+            CrossingEvent.timestamp < until,
         )
         .all()
     )
@@ -166,8 +230,12 @@ def _hourly_flow(
     db: Session,
     camera_ids: list[str],
     since: datetime,
+    until: datetime,
 ) -> list[dict[str, Any]]:
     if not camera_ids:
+        return []
+
+    if until <= since:
         return []
 
     rows = (
@@ -175,6 +243,7 @@ def _hourly_flow(
         .filter(
             CrossingEvent.camera_id.in_(camera_ids),
             CrossingEvent.timestamp >= since,
+            CrossingEvent.timestamp < until,
         )
         .all()
     )
@@ -187,20 +256,20 @@ def _hourly_flow(
         elif row.event_type == "exit":
             buckets[bucket_dt]["exit"] += 1
 
-    now = _utcnow().replace(minute=0, second=0, microsecond=0)
+    end_hour = (until - timedelta(seconds=1)).replace(minute=0, second=0, microsecond=0)
     start = since.replace(minute=0, second=0, microsecond=0)
 
     occupancy = 0
     flow_series: list[dict[str, Any]] = []
     current = start
-    while current <= now:
+    while current <= end_hour:
         entry = buckets[current]["entry"] if current in buckets else 0
         exit_ = buckets[current]["exit"] if current in buckets else 0
         net = entry - exit_
         occupancy += net
         flow_series.append(
             {
-                "hour": current.isoformat(),
+                "hour": _to_iso_utc(current),
                 "entry": entry,
                 "exit": exit_,
                 "net": net,
@@ -215,6 +284,7 @@ def _build_branch_cards(
     cameras: list[CameraStatus],
     latest_counts: dict[str, int],
     crossings_by_camera: dict[str, dict[str, int]],
+    now: datetime,
 ) -> list[dict[str, Any]]:
     by_branch: dict[str, dict[str, Any]] = {}
     for camera in cameras:
@@ -235,7 +305,7 @@ def _build_branch_cards(
         )
 
         card["total_cameras"] += 1
-        if camera.is_connected:
+        if _is_camera_effectively_online(camera, now):
             card["online_cameras"] += 1
         card["current_occupancy"] += latest_counts.get(camera.camera_id, 0)
         card["entries_today"] += crossings_by_camera.get(camera.camera_id, {}).get("entry", 0)
@@ -249,18 +319,20 @@ def _build_branch_cards(
     return sorted(by_branch.values(), key=lambda item: item["branch_name"])
 
 
-def _build_alerts(cameras: list[CameraStatus], latest_counts: dict[str, int]) -> list[dict[str, Any]]:
-    now = _utcnow()
+def _build_alerts(cameras: list[CameraStatus], latest_counts: dict[str, int], now: datetime) -> list[dict[str, Any]]:
     alerts: list[dict[str, Any]] = []
 
     for camera in cameras:
         branch_id, branch_name = _camera_branch_info(camera)
-        if not camera.is_connected:
+        if not _is_camera_effectively_online(camera, now):
             alerts.append(
                 {
                     "severity": "high",
                     "title": "Cámara fuera de línea",
-                    "description": f"{camera.camera_name or camera.camera_id} no está conectada",
+                    "description": (
+                        f"{camera.camera_name or camera.camera_id} no reporta frames hace más de "
+                        f"{OFFLINE_AFTER_MINUTES} min"
+                    ),
                     "camera_id": camera.camera_id,
                     "branch_id": branch_id,
                     "branch_name": branch_name,
@@ -281,23 +353,6 @@ def _build_alerts(cameras: list[CameraStatus], latest_counts: dict[str, int]) ->
                     "branch_name": branch_name,
                 }
             )
-
-        if camera.last_frame_at is not None:
-            age = now - camera.last_frame_at
-            if age > timedelta(minutes=5):
-                alerts.append(
-                    {
-                        "severity": "medium",
-                        "title": "Frame desactualizado",
-                        "description": (
-                            f"{camera.camera_name or camera.camera_id} no reporta frames hace "
-                            f"{int(age.total_seconds() // 60)} min"
-                        ),
-                        "camera_id": camera.camera_id,
-                        "branch_id": branch_id,
-                        "branch_name": branch_name,
-                    }
-                )
 
         if latest_counts.get(camera.camera_id, 0) >= 50:
             alerts.append(
@@ -387,29 +442,40 @@ def _pick_heatmap_slot(
 @router.get("/overview")
 async def get_overview(
     hours: int = Query(default=24, ge=1, le=168),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
     top_branches: int = Query(default=5, ge=1, le=20),
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
     db: Session = Depends(get_db),
 ):
     """
     Resumen global para página principal del dashboard.
     """
-    cameras = db.query(CameraStatus).all()
+    cameras = _filter_cameras_for_user(db.query(CameraStatus).all(), current_user)
     camera_ids = [camera.camera_id for camera in cameras]
+    now = _utcnow()
+    since, until, resolved_start_date, resolved_end_date = _resolve_time_window(
+        hours=hours,
+        start_date=start_date,
+        end_date=end_date,
+    )
 
     latest_counts = _latest_counts_by_camera(db, camera_ids)
-    crossings_by_camera = _crossings_today_by_camera(db, camera_ids)
-    branch_cards = _build_branch_cards(cameras, latest_counts, crossings_by_camera)
-    flow_series = _hourly_flow(db, camera_ids, since=_utcnow() - timedelta(hours=hours))
-    alerts = _build_alerts(cameras, latest_counts)
+    crossings_by_camera = _crossings_in_range_by_camera(db, camera_ids, since=since, until=until)
+    branch_cards = _build_branch_cards(cameras, latest_counts, crossings_by_camera, now=now)
+    flow_series = _hourly_flow(db, camera_ids, since=since, until=until)
+    alerts = _build_alerts(cameras, latest_counts, now=now)
 
     entries_today = sum(item.get("entry", 0) for item in crossings_by_camera.values())
     exits_today = sum(item.get("exit", 0) for item in crossings_by_camera.values())
-    online_cameras = sum(1 for camera in cameras if camera.is_connected)
+    online_cameras = sum(1 for camera in cameras if _is_camera_effectively_online(camera, now))
     total_cameras = len(cameras)
 
     return {
-        "timestamp": _utcnow().isoformat(),
-        "window_hours": hours,
+        "timestamp": _to_iso_utc(now),
+        "window_hours": max(1, int((until - since).total_seconds() // 3600)),
+        "start_date": resolved_start_date.isoformat(),
+        "end_date": resolved_end_date.isoformat(),
         "total_branches": len(branch_cards),
         "total_cameras": total_cameras,
         "online_cameras": online_cameras,
@@ -439,16 +505,25 @@ async def list_branch_cards(
     q: str | None = Query(default=None, min_length=1),
     sort_by: Literal["name", "occupancy", "entries", "exits", "online_ratio"] = Query(default="name"),
     order: Literal["asc", "desc"] = Query(default="asc"),
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
     db: Session = Depends(get_db),
 ):
     """
     Tarjetas resumen por sucursal para vista global.
     """
-    cameras = db.query(CameraStatus).all()
+    cameras = _filter_cameras_for_user(db.query(CameraStatus).all(), current_user)
     camera_ids = [camera.camera_id for camera in cameras]
+    now = _utcnow()
     latest_counts = _latest_counts_by_camera(db, camera_ids)
-    crossings_by_camera = _crossings_today_by_camera(db, camera_ids)
-    branches = _build_branch_cards(cameras, latest_counts, crossings_by_camera)
+    today_start = datetime.combine(date.today(), datetime.min.time())
+    tomorrow_start = today_start + timedelta(days=1)
+    crossings_by_camera = _crossings_in_range_by_camera(
+        db,
+        camera_ids,
+        since=today_start,
+        until=tomorrow_start,
+    )
+    branches = _build_branch_cards(cameras, latest_counts, crossings_by_camera, now=now)
 
     if q:
         query = q.lower().strip()
@@ -463,7 +538,7 @@ async def list_branch_cards(
     exits_today = sum(branch["exits_today"] for branch in branches)
 
     return {
-        "timestamp": _utcnow().isoformat(),
+        "timestamp": _to_iso_utc(now),
         "filters": {"q": q, "sort_by": sort_by, "order": order},
         "summary": {
             "entries_today": entries_today,
@@ -479,18 +554,34 @@ async def list_branch_cards(
 async def get_branch_detail(
     branch_id: str,
     hours: int = Query(default=24, ge=1, le=168),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
     db: Session = Depends(get_db)
 ):
     """
     Detalle de sucursal para dashboard.
     """
-    cameras = db.query(CameraStatus).all()
+    _ensure_branch_access(branch_id, current_user)
+
+    cameras = _filter_cameras_for_user(db.query(CameraStatus).all(), current_user)
     branch_cameras = [camera for camera in cameras if _camera_branch_info(camera)[0] == branch_id]
     camera_ids = [camera.camera_id for camera in branch_cameras]
+    now = _utcnow()
+    since, until, resolved_start_date, resolved_end_date = _resolve_time_window(
+        hours=hours,
+        start_date=start_date,
+        end_date=end_date,
+    )
 
     latest_counts = _latest_counts_by_camera(db, camera_ids)
-    crossings_by_camera, crossings_gender_by_camera = _crossings_today_with_gender_by_camera(db, camera_ids)
-    flow_series = _hourly_flow(db, camera_ids, since=_utcnow() - timedelta(hours=hours))
+    crossings_by_camera, crossings_gender_by_camera = _crossings_in_range_with_gender_by_camera(
+        db,
+        camera_ids,
+        since=since,
+        until=until,
+    )
+    flow_series = _hourly_flow(db, camera_ids, since=since, until=until)
 
     cameras_payload = []
     for camera in branch_cameras:
@@ -498,10 +589,10 @@ async def get_branch_detail(
             {
                 "camera_id": camera.camera_id,
                 "camera_name": camera.camera_name,
-                "is_connected": camera.is_connected,
+                "is_connected": _is_camera_effectively_online(camera, now),
                 "fps": camera.fps,
                 "error_count": camera.error_count,
-                "last_frame_at": camera.last_frame_at,
+                "last_frame_at": _to_iso_utc(camera.last_frame_at),
                 "current_count": latest_counts.get(camera.camera_id, 0),
                 "entry_today": crossings_by_camera.get(camera.camera_id, {}).get("entry", 0),
                 "exit_today": crossings_by_camera.get(camera.camera_id, {}).get("exit", 0),
@@ -512,15 +603,17 @@ async def get_branch_detail(
 
     entries_today = sum(item.get("entry", 0) for item in crossings_by_camera.values())
     exits_today = sum(item.get("exit", 0) for item in crossings_by_camera.values())
-    online_cameras = sum(1 for camera in branch_cameras if camera.is_connected)
-    branch_alerts = _build_alerts(branch_cameras, latest_counts)
+    online_cameras = sum(1 for camera in branch_cameras if _is_camera_effectively_online(camera, now))
+    branch_alerts = _build_alerts(branch_cameras, latest_counts, now=now)
     occupancy_peak = max((item["occupancy_end"] for item in flow_series), default=0)
     entries_by_gender = _sum_gender_counts(crossings_gender_by_camera, "entry")
     exits_by_gender = _sum_gender_counts(crossings_gender_by_camera, "exit")
 
     return {
-        "timestamp": _utcnow().isoformat(),
-        "window_hours": hours,
+        "timestamp": _to_iso_utc(now),
+        "window_hours": max(1, int((until - since).total_seconds() // 3600)),
+        "start_date": resolved_start_date.isoformat(),
+        "end_date": resolved_end_date.isoformat(),
         "branch_id": branch_id,
         "branch_name": _camera_branch_info(branch_cameras[0])[1] if branch_cameras else branch_id,
         "entries_today": entries_today,
@@ -544,15 +637,19 @@ async def get_branch_heatmaps(
     branch_id: str,
     target_date: date | None = Query(default=None),
     hour: int | None = Query(default=None, ge=0, le=23),
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
     db: Session = Depends(get_db),
 ):
     """
     Heatmaps horarios por sucursal (uno por cámara para el slot seleccionado).
     """
-    cameras = db.query(CameraStatus).all()
+    _ensure_branch_access(branch_id, current_user)
+
+    cameras = _filter_cameras_for_user(db.query(CameraStatus).all(), current_user)
     branch_cameras = [camera for camera in cameras if _camera_branch_info(camera)[0] == branch_id]
     camera_ids = [camera.camera_id for camera in branch_cameras]
     branch_name = _camera_branch_info(branch_cameras[0])[1] if branch_cameras else branch_id
+    now = _utcnow()
 
     available_slots = _list_heatmap_slots(db, camera_ids=camera_ids, limit=96)
     selected_date, selected_hour = _pick_heatmap_slot(
@@ -583,15 +680,15 @@ async def get_branch_heatmaps(
             {
                 "camera_id": camera.camera_id,
                 "camera_name": camera.camera_name,
-                "is_connected": bool(camera.is_connected),
-                "last_frame_at": camera.last_frame_at,
+                "is_connected": _is_camera_effectively_online(camera, now),
+                "last_frame_at": _to_iso_utc(camera.last_frame_at),
                 "heatmap": heatmap_data,
             }
         )
 
     populated = sum(1 for camera in cameras_payload if camera["heatmap"] is not None)
     return {
-        "timestamp": _utcnow().isoformat(),
+        "timestamp": _to_iso_utc(now),
         "branch_id": branch_id,
         "branch_name": branch_name,
         "selected_slot": (

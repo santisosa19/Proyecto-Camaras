@@ -132,3 +132,21 @@ class CrossingEvent(Base):
         Index('idx_crossing_camera_time', 'camera_id', 'timestamp'),
         Index('idx_crossing_camera_type_time', 'camera_id', 'event_type', 'timestamp'),
     )
+
+
+class AppUser(Base):
+    """Usuarios de autenticación para dashboard y API protegida."""
+    __tablename__ = "app_users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(100), unique=True, nullable=False, index=True)
+    password_hash = Column(String(255), nullable=False)
+    role = Column(String(30), nullable=False, default="branch_manager")
+    branch_id = Column(String(50), nullable=True, index=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index('idx_app_users_role_active', 'role', 'is_active'),
+    )

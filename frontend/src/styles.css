@@ -225,6 +225,70 @@ a:hover {
   min-width: 150px;
 }
 
+.date-range-filter {
+  position: relative;
+  min-width: 280px;
+}
+
+.date-range-trigger {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.58rem 0.65rem;
+  background: #fff;
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.date-range-popover {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  left: 0;
+  z-index: 20;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: var(--shadow);
+  padding: 0.6rem;
+}
+
+.date-range-actions {
+  margin-top: 0.5rem;
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.45rem;
+}
+
+.date-range-btn {
+  padding: 0.42rem 0.7rem;
+  border-radius: 8px;
+  font-size: 0.82rem;
+}
+
+.date-range-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.date-range-btn.secondary {
+  background: #ffffff;
+  color: var(--ink);
+  border: 1px solid var(--border);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .control-group label {
   color: var(--muted);
   font-size: 0.84rem;
@@ -582,12 +646,32 @@ td small {
   display: block;
 }
 
+.heatmap-stage .heatmap-placeholder {
+  width: 100%;
+  min-height: 170px;
+  display: grid;
+  place-items: center;
+  color: #d3e6f5;
+  background: linear-gradient(160deg, #102b3c 0%, #0d1f2b 100%);
+  font-size: 0.88rem;
+}
+
 .heatmap-stage .heatmap-overlay {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
+  pointer-events: none;
+}
+
+.heatmap-stage .heatmap-overlay-missing {
+  position: absolute;
+  inset: auto 0 0 0;
+  padding: 0.42rem 0.6rem;
+  font-size: 0.74rem;
+  color: #f0f7ff;
+  background: rgba(15, 37, 52, 0.76);
   pointer-events: none;
 }
 

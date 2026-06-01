@@ -17,7 +17,13 @@ CAMERA_RTSP_URL=rtsp://user:pass@ip_dvr:554/Streaming/Channels/101
 SAVE_TO_API=true
 REMOTE_API_BASE_URL=http://ip-servidor-central:8000
 REMOTE_API_KEY=tu_ingest_api_key
+ENTRY_DIRECTION=positive
+ENTRY_DIRECTION_FORCE=false
 ```
+
+Notas sobre dirección de conteo:
+- `ENTRY_DIRECTION` define qué cruce se considera **entrada** (`positive` o `negative`).
+- Si ya tenés `lines_config.json` guardado y querés forzar por env, usá `ENTRY_DIRECTION_FORCE=true`.
 
 3. Levantar:
 

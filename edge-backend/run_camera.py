@@ -47,6 +47,23 @@ from app.services.apparent_gender import ApparentGenderEstimator
 LINES_CONFIG_FILE = Path(__file__).parent / "lines_config.json"
 
 
+def env_str(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name, "true" if default else "false").strip().lower()
+    return raw in {"1", "true", "t", "yes", "y", "on"}
+
+
+def env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} debe ser un entero válido. Valor recibido: '{raw}'") from exc
+
+
 def sanitize_rtsp_url(url: str) -> str:
     """
     Oculta credenciales en logs de URLs RTSP/HTTP.
@@ -76,6 +93,7 @@ class LineConfigurator:
         self.points = []
         self.lines = []
         self.current_frame = None
+        self.window_name = "Line Configuration"
         
     def configure(self):
         """Modo interactivo de configuración"""
@@ -92,9 +110,19 @@ class LineConfigurator:
         logger.info("  6. Presiona 'q' para SALIR sin guardar")
         logger.info("="*60)
         
-        # Configurar callback del mouse
-        cv2.namedWindow("Configuración de Líneas")
-        cv2.setMouseCallback("Configuración de Líneas", self._mouse_callback)
+        # Configurar callback del mouse en una sola ventana con título ASCII.
+        # En sesiones remotas de Windows (AnyDesk/RDP), títulos con acentos
+        # pueden terminar creando ventanas duplicadas y perder eventos de click.
+        try:
+            cv2.destroyWindow(self.window_name)
+        except cv2.error:
+            pass
+        try:
+            cv2.destroyWindow("Configuración de Líneas")
+        except cv2.error:
+            pass
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        cv2.setMouseCallback(self.window_name, self._mouse_callback)
         
         while True:
             # Capturar frame
@@ -153,7 +181,7 @@ class LineConfigurator:
                 2
             )
             
-            cv2.imshow("Configuración de Líneas", display_frame)
+            cv2.imshow(self.window_name, display_frame)
             
             # Manejar teclas
             key = cv2.waitKey(1) & 0xFF
@@ -162,7 +190,7 @@ class LineConfigurator:
                 if len(self.lines) >= 1:
                     self._save_configuration()
                     logger.info("✓ Configuración guardada")
-                    cv2.destroyWindow("Configuración de Líneas")
+                    cv2.destroyWindow(self.window_name)
                     return self.lines
                 else:
                     logger.warning("⚠ Configura al menos una línea antes de guardar")
@@ -178,7 +206,7 @@ class LineConfigurator:
             
             elif key == ord('q'):  # Salir sin guardar
                 logger.info("Saliendo sin guardar configuración")
-                cv2.destroyWindow("Configuración de Líneas")
+                cv2.destroyWindow(self.window_name)
                 return None
     
     def _mouse_callback(self, event, x, y, flags, param):
@@ -421,9 +449,9 @@ class TrafficAnalysisSystem:
         self.camera_id = camera_id
         self.camera_name = camera_name
         self.rtsp_url = rtsp_url
-        if entry_direction not in {"positive", "negative"}:
-            raise ValueError("entry_direction debe ser 'positive' o 'negative'")
-        self.entry_direction = entry_direction
+        self.entry_direction = self._normalize_entry_direction(entry_direction)
+        self.edge_id = env_str("EDGE_ID", camera_id)
+        self.payload_version = env_str("PAYLOAD_VERSION", "1.0")
         self.show_window = show_window
         self.save_to_db = save_to_db
         self.save_to_api = save_to_api
@@ -438,9 +466,6 @@ class TrafficAnalysisSystem:
         self.current_heatmap_hour_start: datetime | None = None
         self.gender_estimator: ApparentGenderEstimator | None = None
         self.latest_track_gender: dict[int, dict] = {}
-        self.require_tracked_detections = (
-            os.getenv("DETECTIONS_REQUIRE_TRACK_ID", "true").lower() == "true"
-        )
 
         # Configuración de mapa de calor
         self.heatmap_enabled = os.getenv("HEATMAP_ENABLED", "true").lower() == "true"
@@ -457,10 +482,6 @@ class TrafficAnalysisSystem:
             15.0,
             float(os.getenv("HOURLY_HEATMAP_PARTIAL_FLUSH_SECONDS", "60")),
         )
-        self.hourly_heatmap_min_nonzero_intensity = max(
-            0,
-            min(80, int(os.getenv("HOURLY_HEATMAP_MIN_NONZERO_INTENSITY", "12"))),
-        )
         self.last_hourly_heatmap_partial_flush = 0.0
 
         self.heatmap_background_max_width = max(160, int(os.getenv("HEATMAP_BACKGROUND_MAX_WIDTH", "960")))
@@ -472,6 +493,7 @@ class TrafficAnalysisSystem:
         )
         self.last_heatmap_background_update = 0.0
         self.latest_heatmap_background_base64: str | None = None
+        self.entry_direction_force = env_bool("ENTRY_DIRECTION_FORCE", False)
         
         # Estadísticas
         self.stats = {
@@ -485,17 +507,12 @@ class TrafficAnalysisSystem:
         # Inicializar componentes
         self._init_components()
 
-    def _filter_detections(self, detections):
-        """
-        Filtra detecciones ruidosas.
-        Por defecto solo conserva detecciones con track_id para evitar falsos
-        positivos instantáneos (ghost boxes) que no llegan a trackearse.
-        """
-        if not detections:
-            return detections
-        if not self.require_tracked_detections:
-            return detections
-        return [det for det in detections if det.track_id is not None]
+    @staticmethod
+    def _normalize_entry_direction(value: str) -> str:
+        normalized = (value or "").strip().lower()
+        if normalized not in {"positive", "negative"}:
+            raise ValueError("entry_direction debe ser 'positive' o 'negative'")
+        return normalized
     
     def _init_components(self):
         """Inicializar todos los componentes"""
@@ -531,11 +548,11 @@ class TrafficAnalysisSystem:
             logger.info("✓ Cámara conectada")
             
             # 2. Detector YOLO
-            logger.info("Cargando detector YOLO...")
+            logger.info("Cargando detector YOLOv8...")
             yolo_model_path = os.getenv("YOLO_MODEL_PATH", "yolov8n.pt").strip() or "yolov8n.pt"
-            yolo_confidence = float(os.getenv("YOLO_CONFIDENCE", "0.45"))
+            yolo_confidence = float(os.getenv("YOLO_CONFIDENCE", "0.22"))
             yolo_iou = float(os.getenv("YOLO_IOU", "0.60"))
-            yolo_image_size = int(os.getenv("YOLO_IMAGE_SIZE", "1280"))
+            yolo_image_size = int(os.getenv("YOLO_IMAGE_SIZE", "960"))
             yolo_max_det = int(os.getenv("YOLO_MAX_DETECTIONS", "120"))
             yolo_tracker = os.getenv("YOLO_TRACKER", "trackers/bytetrack_stable.yaml").strip() or "trackers/bytetrack_stable.yaml"
             yolo_device = os.getenv("YOLO_DEVICE", "auto").strip() or "auto"
@@ -581,7 +598,15 @@ class TrafficAnalysisSystem:
                     direction="both"
                 )
             else:
-                self.entry_direction = loaded_config.get("entry_direction", "positive")
+                loaded_entry_direction = loaded_config.get("entry_direction", "positive")
+                if self.entry_direction_force:
+                    logger.info(
+                        "ENTRY_DIRECTION_FORCE activo: se mantiene '%s' y se ignora '%s' de lines_config.json",
+                        self.entry_direction,
+                        loaded_entry_direction,
+                    )
+                else:
+                    self.entry_direction = self._normalize_entry_direction(loaded_entry_direction)
                 self.lines_config = loaded_config.get("lines", [])
                 # Usar configuración guardada
                 for line_config in self.lines_config:
@@ -606,23 +631,6 @@ class TrafficAnalysisSystem:
                 gender_model_prototxt = str(Path(__file__).parent / gender_model_prototxt)
             if gender_model_weights and not os.path.isabs(gender_model_weights):
                 gender_model_weights = str(Path(__file__).parent / gender_model_weights)
-            gender_sample_every_n_frames = int(os.getenv("GENDER_SAMPLE_EVERY_N_FRAMES", "10"))
-            gender_vote_window = int(os.getenv("GENDER_VOTE_WINDOW", "12"))
-            gender_min_votes = int(os.getenv("GENDER_MIN_VOTES", "5"))
-            gender_confidence_threshold = float(os.getenv("GENDER_CONFIDENCE_THRESHOLD", "0.64"))
-            gender_aggregate_confidence_threshold = float(
-                os.getenv("GENDER_AGGREGATE_CONFIDENCE_THRESHOLD", "0.67")
-            )
-            gender_female_confidence_threshold = float(
-                os.getenv("GENDER_FEMALE_CONFIDENCE_THRESHOLD", "0.78")
-            )
-            gender_lock_confidence_threshold = float(
-                os.getenv("GENDER_LOCK_CONFIDENCE_THRESHOLD", "0.72")
-            )
-            gender_lock_min_votes = int(os.getenv("GENDER_LOCK_MIN_VOTES", "6"))
-            gender_flip_margin = float(os.getenv("GENDER_FLIP_MARGIN", "0.18"))
-            gender_flip_min_votes = int(os.getenv("GENDER_FLIP_MIN_VOTES", "6"))
-            gender_stale_track_seconds = float(os.getenv("GENDER_STALE_TRACK_SECONDS", "25"))
 
             self.gender_estimator = ApparentGenderEstimator(
                 enabled=apparent_gender_enabled,
@@ -630,17 +638,11 @@ class TrafficAnalysisSystem:
                 model_weights_path=gender_model_weights,
                 model_dir=gender_model_dir,
                 auto_download=os.getenv("GENDER_AUTO_DOWNLOAD_MODEL", "true").lower() == "true",
-                sample_every_n_frames=gender_sample_every_n_frames,
-                vote_window=gender_vote_window,
-                min_votes=gender_min_votes,
-                confidence_threshold=gender_confidence_threshold,
-                aggregate_confidence_threshold=gender_aggregate_confidence_threshold,
-                female_confidence_threshold=gender_female_confidence_threshold,
-                lock_confidence_threshold=gender_lock_confidence_threshold,
-                lock_min_votes=gender_lock_min_votes,
-                flip_margin=gender_flip_margin,
-                flip_min_votes=gender_flip_min_votes,
-                stale_track_seconds=gender_stale_track_seconds,
+                sample_every_n_frames=int(os.getenv("GENDER_SAMPLE_EVERY_N_FRAMES", "5")),
+                vote_window=int(os.getenv("GENDER_VOTE_WINDOW", "12")),
+                min_votes=int(os.getenv("GENDER_MIN_VOTES", "2")),
+                confidence_threshold=float(os.getenv("GENDER_CONFIDENCE_THRESHOLD", "0.52")),
+                stale_track_seconds=float(os.getenv("GENDER_STALE_TRACK_SECONDS", "25")),
             )
             if self.gender_estimator.enabled:
                 logger.info("✓ Género aparente habilitado")
@@ -657,6 +659,11 @@ class TrafficAnalysisSystem:
                 heatmap_overlay_alpha = float(os.getenv("HEATMAP_OVERLAY_ALPHA", "0.35"))
                 heatmap_blur_kernel = int(os.getenv("HEATMAP_BLUR_KERNEL", "21"))
                 heatmap_decay = float(os.getenv("HEATMAP_DECAY_PER_SECOND", "0.0"))
+                heatmap_norm_percentile = float(os.getenv("HEATMAP_NORMALIZATION_PERCENTILE", "99"))
+                heatmap_norm_rise_alpha = float(os.getenv("HEATMAP_NORMALIZATION_RISE_ALPHA", "0.08"))
+                heatmap_norm_fall_alpha = float(os.getenv("HEATMAP_NORMALIZATION_FALL_ALPHA", "0.01"))
+                heatmap_norm_gamma = float(os.getenv("HEATMAP_NORMALIZATION_GAMMA", "0.85"))
+                heatmap_overlay_min_intensity = int(os.getenv("HEATMAP_OVERLAY_MIN_INTENSITY", "1"))
 
                 self.heatmap = OccupancyHeatmap(
                     camera_id=self.camera_id,
@@ -665,6 +672,11 @@ class TrafficAnalysisSystem:
                     blur_kernel=heatmap_blur_kernel,
                     decay_per_second=heatmap_decay,
                     output_dir=heatmap_output_dir,
+                    normalization_percentile=heatmap_norm_percentile,
+                    normalization_rise_alpha=heatmap_norm_rise_alpha,
+                    normalization_fall_alpha=heatmap_norm_fall_alpha,
+                    normalization_gamma=heatmap_norm_gamma,
+                    overlay_min_intensity=heatmap_overlay_min_intensity,
                     metadata={
                         "camera_name": self.camera_name,
                         "branch_id": self.branch_id,
@@ -678,9 +690,12 @@ class TrafficAnalysisSystem:
                     overlay_alpha=heatmap_overlay_alpha,
                     blur_kernel=heatmap_blur_kernel,
                     decay_per_second=0.0,
-                    min_nonzero_intensity=self.hourly_heatmap_min_nonzero_intensity,
-                    monotonic_render=True,
                     output_dir=hourly_dir,
+                    normalization_percentile=heatmap_norm_percentile,
+                    normalization_rise_alpha=heatmap_norm_rise_alpha,
+                    normalization_fall_alpha=heatmap_norm_fall_alpha,
+                    normalization_gamma=heatmap_norm_gamma,
+                    overlay_min_intensity=heatmap_overlay_min_intensity,
                     metadata={
                         "camera_name": self.camera_name,
                         "branch_id": self.branch_id,
@@ -727,7 +742,6 @@ class TrafficAnalysisSystem:
                 
                 # Detectar personas (con tracking)
                 detections = self.detector.detect(frame, track=True)
-                detections = self._filter_detections(detections)
                 now_ts = time.time()
                 now_dt = datetime.utcnow()
                 if self.gender_estimator is not None and self.gender_estimator.enabled:
@@ -738,6 +752,11 @@ class TrafficAnalysisSystem:
                         now_ts=now_ts,
                     )
                     self._apply_track_genders(detections, track_gender_states)
+
+                if self.hourly_heatmap is not None:
+                    if now_ts - self.last_heatmap_background_update >= self.heatmap_background_refresh_seconds:
+                        self.latest_heatmap_background_base64 = self._encode_background_frame(frame)
+                        self.last_heatmap_background_update = now_ts
 
                 if self.hourly_heatmap is not None and self.current_heatmap_hour_start is not None:
                     frame_hour_start = now_dt.replace(minute=0, second=0, microsecond=0)
@@ -774,9 +793,6 @@ class TrafficAnalysisSystem:
                             is_partial=True,
                         )
                         self.last_hourly_heatmap_partial_flush = now_ts
-                    if now_ts - self.last_heatmap_background_update >= self.heatmap_background_refresh_seconds:
-                        self.latest_heatmap_background_base64 = self._encode_background_frame(frame)
-                        self.last_heatmap_background_update = now_ts
                 
                 # Actualizar contador
                 count_stats = self.counter.update(detections)
@@ -800,14 +816,11 @@ class TrafficAnalysisSystem:
                         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                         
                         # Label con ID y confianza
-                        if self.gender_estimator is None or not self.gender_estimator.enabled:
-                            gender_short = "OFF"
-                        elif det.apparent_gender == "male":
+                        gender_short = "?"
+                        if det.apparent_gender == "male":
                             gender_short = "M"
                         elif det.apparent_gender == "female":
                             gender_short = "F"
-                        else:
-                            gender_short = "U"
                         track_label = det.track_id if det.track_id is not None else "-"
                         label = f"ID:{track_label} G:{gender_short} {det.confidence:.2f}"
                         cv2.putText(
@@ -828,6 +841,7 @@ class TrafficAnalysisSystem:
                         f"FPS: {fps:.1f}",
                         f"Detectados: {len(detections)}",
                         f"Tracks activos: {count_stats['active_tracks']}",
+                        f"ENTRADA => {self.entry_direction.upper()}",
                     ]
                     
                     # Agregar conteos de todas las líneas
@@ -984,7 +998,10 @@ class TrafficAnalysisSystem:
             with get_db_context() as db:
                 rows = []
                 for event in crossing_events:
-                    direction = event.get('direction')
+                    direction = (event.get('direction') or '').strip().lower()
+                    if direction not in {"positive", "negative"}:
+                        logger.warning("Evento de cruce con dirección inválida: %s", event)
+                        continue
                     is_entry = direction == self.entry_direction
                     event_type = "entry" if is_entry else "exit"
                     event_ts = datetime.fromisoformat(event['timestamp'])
@@ -1011,7 +1028,10 @@ class TrafficAnalysisSystem:
 
         rows = []
         for event in crossing_events:
-            direction = event.get('direction')
+            direction = (event.get('direction') or '').strip().lower()
+            if direction not in {"positive", "negative"}:
+                logger.warning("Evento de cruce con dirección inválida (ingesta remota): %s", event)
+                continue
             is_entry = direction == self.entry_direction
             event_type = "entry" if is_entry else "exit"
             rows.append(
@@ -1022,7 +1042,9 @@ class TrafficAnalysisSystem:
                     "event_type": event_type,
                     "track_id": event.get('track_id'),
                     "event_metadata": self._build_crossing_event_metadata(event),
-                    "timestamp": event.get('timestamp')
+                    "timestamp": event.get('timestamp'),
+                    "edge_id": self.edge_id,
+                    "payload_version": self.payload_version,
                 }
             )
 
@@ -1050,6 +1072,8 @@ class TrafficAnalysisSystem:
             "fps": self.stats['frames_processed'] / (time.time() - self.stats['start_time']),
             "total_frames": self.stats['frames_processed'],
             "error_count": capture_stats.get('error_count', 0),
+            "edge_id": self.edge_id,
+            "payload_version": self.payload_version,
         }
         self.remote_ingest.enqueue_detection(payload)
 
@@ -1073,7 +1097,16 @@ class TrafficAnalysisSystem:
 
     def _build_crossing_event_metadata(self, event: dict) -> dict:
         """Construir metadata enriquecida para un evento de cruce."""
-        metadata = {"position": event.get("position")}
+        metadata = {
+            "position": event.get("position"),
+            "camera_id": self.camera_id,
+            "camera_name": self.camera_name,
+            "branch_id": self.branch_id or None,
+            "branch_name": self.branch_name or None,
+            "entry_direction_config": self.entry_direction,
+            "edge_id": self.edge_id,
+            "payload_version": self.payload_version,
+        }
         track_id = event.get("track_id")
         if track_id is None:
             return metadata
@@ -1136,6 +1169,9 @@ class TrafficAnalysisSystem:
             return
 
         snapshot = self.hourly_heatmap.snapshot()
+        overlay_png_base64 = self.hourly_heatmap.export_overlay_png_base64()
+        if overlay_png_base64 is None and self.heatmap is not None:
+            overlay_png_base64 = self.heatmap.export_overlay_png_base64()
         payload = {
             "camera_id": self.camera_id,
             "camera_name": self.camera_name,
@@ -1149,8 +1185,10 @@ class TrafficAnalysisSystem:
             "grid": snapshot["grid"],
             "stats": snapshot["stats"],
             "background_image_base64": self.latest_heatmap_background_base64,
-            "overlay_png_base64": self.hourly_heatmap.export_overlay_png_base64(),
+            "overlay_png_base64": overlay_png_base64,
             "is_partial": is_partial,
+            "edge_id": self.edge_id,
+            "payload_version": self.payload_version,
         }
         self.remote_ingest.enqueue_heatmap(payload)
     
@@ -1178,7 +1216,15 @@ class TrafficAnalysisSystem:
         loaded_config = load_lines_configuration(self.camera_id)
         
         if loaded_config:
-            self.entry_direction = loaded_config.get("entry_direction", "positive")
+            loaded_entry_direction = loaded_config.get("entry_direction", "positive")
+            if self.entry_direction_force:
+                logger.info(
+                    "ENTRY_DIRECTION_FORCE activo tras recarga: se mantiene '%s' y se ignora '%s'",
+                    self.entry_direction,
+                    loaded_entry_direction,
+                )
+            else:
+                self.entry_direction = self._normalize_entry_direction(loaded_entry_direction)
             self.lines_config = loaded_config.get("lines", [])
             for line_config in self.lines_config:
                 self.counter.add_line(
@@ -1239,22 +1285,29 @@ def main():
     
     # Configuración de la cámara
     CAMERA_CONFIG = {
-        'camera_id': 'camara_prueba_marathon',
-        'camera_name': 'Cámara de Prueba Marathon',
-        'rtsp_url': os.getenv('CAMERA_RTSP_URL', '').strip(),
-        'entry_direction': 'negative',  # positive = entra, negative = sale
-        'show_window': os.getenv('SHOW_WINDOW', 'false').lower() == 'true',
-        'save_to_db': os.getenv('SAVE_TO_DB', 'false').lower() == 'true',
-        'save_to_api': os.getenv('SAVE_TO_API', 'false').lower() == 'true',
-        'remote_api_base_url': os.getenv('REMOTE_API_BASE_URL', ''),
-        'remote_api_key': os.getenv('REMOTE_API_KEY', ''),
-        'max_ingest_queue_size': int(os.getenv('MAX_INGEST_QUEUE_SIZE', '10000')),
-        'branch_id': os.getenv('BRANCH_ID', ''),
-        'branch_name': os.getenv('BRANCH_NAME', ''),
+        'camera_id': env_str('CAMERA_ID', 'camara_default'),
+        'camera_name': env_str('CAMERA_NAME', 'Camara Default'),
+        'rtsp_url': env_str('CAMERA_RTSP_URL', ''),
+        'entry_direction': env_str('ENTRY_DIRECTION', 'positive'),
+        'show_window': env_bool('SHOW_WINDOW', False),
+        'save_to_db': env_bool('SAVE_TO_DB', False),
+        'save_to_api': env_bool('SAVE_TO_API', False),
+        'remote_api_base_url': env_str('REMOTE_API_BASE_URL', ''),
+        'remote_api_key': env_str('REMOTE_API_KEY', ''),
+        'max_ingest_queue_size': env_int('MAX_INGEST_QUEUE_SIZE', 10000),
+        'branch_id': env_str('BRANCH_ID', ''),
+        'branch_name': env_str('BRANCH_NAME', ''),
     }
 
+    if not CAMERA_CONFIG['camera_id']:
+        raise ValueError("CAMERA_ID es obligatorio")
+    if not CAMERA_CONFIG['camera_name']:
+        raise ValueError("CAMERA_NAME es obligatorio")
     if not CAMERA_CONFIG['rtsp_url']:
         raise ValueError("CAMERA_RTSP_URL es obligatorio")
+
+    if CAMERA_CONFIG['save_to_api'] and not CAMERA_CONFIG['remote_api_base_url']:
+        raise ValueError("REMOTE_API_BASE_URL es obligatorio cuando SAVE_TO_API=true")
     
     logger.info("=" * 60)
     logger.info("TRAFFIC ANALYSIS SYSTEM - Marathon SRL")

@@ -5,7 +5,6 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y \
-    ca-certificates \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
@@ -13,7 +12,6 @@ RUN apt-get update && apt-get install -y \
     libgomp1 \
     libgl1 \
     ffmpeg \
-    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
