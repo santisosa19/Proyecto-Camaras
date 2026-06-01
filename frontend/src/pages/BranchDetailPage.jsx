@@ -7,13 +7,13 @@ import { HeatmapCameraGrid } from "../components/heatmaps/HeatmapCameraGrid";
 import { DateRangeFilter } from "../components/filters/DateRangeFilter";
 import { fetchJson } from "../services/api";
 import { defaultLastDays, normalizeDateRange, rangeWindowHours } from "../utils/dateRange";
-import { formatDateTime, formatNumber, formatSlotLabel, genderTitle } from "../utils/formatters";
+import { formatDateTime, formatNumber, formatSlotLabel } from "../utils/formatters";
 import { toQuery } from "../utils/query";
 
 export function BranchDetailPage({ user }) {
   const { branchId } = useParams();
-  const [dateRange, setDateRange] = useState(() => defaultLastDays(7));
-  const [appliedRange, setAppliedRange] = useState(() => defaultLastDays(7));
+  const [dateRange, setDateRange] = useState(() => defaultLastDays(1));
+  const [appliedRange, setAppliedRange] = useState(() => defaultLastDays(1));
   const [refreshSeconds, setRefreshSeconds] = useState(30);
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
@@ -106,8 +106,6 @@ export function BranchDetailPage({ user }) {
 
   if (error) return <div className="panel error-box">Error cargando detalle: {error}</div>;
   if (!data) return <div className="panel">Cargando detalle...</div>;
-  const entriesByGender = data.entries_by_gender || {};
-  const exitsByGender = data.exits_by_gender || {};
   const normalizedRange = normalizeDateRange(dateRange.startDate, dateRange.endDate);
   const chartWindowHours = rangeWindowHours(normalizedRange.startDate, normalizedRange.endDate);
   const chartGranularityLabel = chartWindowHours >= 168 ? "por dia" : "por hora";
@@ -145,21 +143,6 @@ export function BranchDetailPage({ user }) {
         <KpiCard title="Estado camaras" value={`${data.online_cameras}/${data.total_cameras}`} helper={`${Math.round((data.online_ratio || 0) * 100)}% online`} />
       </div>
 
-      <article className="panel">
-        <div className="panel-header">
-          <h3>Entradas/Salidas por genero aparente</h3>
-          <p>Estimacion visual por rostro; si no hay senal suficiente se clasifica como sin clasificar.</p>
-        </div>
-        <div className="kpi-grid">
-          <KpiCard title={genderTitle("entry", "male")} value={formatNumber(entriesByGender.male || 0)} />
-          <KpiCard title={genderTitle("entry", "female")} value={formatNumber(entriesByGender.female || 0)} />
-          <KpiCard title={genderTitle("entry", "unknown")} value={formatNumber(entriesByGender.unknown || 0)} />
-          <KpiCard title={genderTitle("exit", "male")} value={formatNumber(exitsByGender.male || 0)} />
-          <KpiCard title={genderTitle("exit", "female")} value={formatNumber(exitsByGender.female || 0)} />
-          <KpiCard title={genderTitle("exit", "unknown")} value={formatNumber(exitsByGender.unknown || 0)} />
-        </div>
-      </article>
-
       <article className="panel flow-panel">
         <div className="panel-header">
           <h3>Tendencia de trafico de la sucursal</h3>
@@ -173,7 +156,7 @@ export function BranchDetailPage({ user }) {
       <article className="panel">
         <div className="panel-header">
           <h3>Performance por camara</h3>
-          <p>Conteo actual y errores reportados</p>
+          <p>Conteo actual por camara</p>
         </div>
         <CameraLoadChart cameras={data.cameras || []} />
       </article>
@@ -231,13 +214,12 @@ export function BranchDetailPage({ user }) {
         </div>
         <div className="table-wrap">
           <table>
-            <caption className="sr-only">Tabla de camaras con estado, FPS, errores, conteo, entradas y salidas</caption>
+            <caption className="sr-only">Tabla de camaras con estado, FPS, conteo, entradas y salidas</caption>
             <thead>
               <tr>
                 <th scope="col">Camara</th>
                 <th scope="col">Estado</th>
                 <th scope="col">FPS</th>
-                <th scope="col">Errores</th>
                 <th scope="col">Conteo actual</th>
                 <th scope="col">Entradas</th>
                 <th scope="col">Salidas</th>
@@ -252,7 +234,6 @@ export function BranchDetailPage({ user }) {
                     <StatusPill online={camera.is_connected} />
                   </td>
                   <td>{Number(camera.fps || 0).toFixed(1)}</td>
-                  <td>{formatNumber(camera.error_count || 0)}</td>
                   <td>{formatNumber(camera.current_count || 0)}</td>
                   <td>{formatNumber(camera.entry_today || 0)}</td>
                   <td>{formatNumber(camera.exit_today || 0)}</td>

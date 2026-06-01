@@ -238,17 +238,15 @@ export function CameraLoadChart({ cameras }) {
   }
 
   return (
-    <div className="chart-wrap" role="img" aria-label="Performance por camara: conteo actual y errores">
+    <div className="chart-wrap" role="img" aria-label="Performance por camara: conteo actual">
       <ResponsiveContainer width="100%" height={280}>
         <ComposedChart data={data} margin={{ top: 8, right: 10, left: 0, bottom: 10 }}>
           <CartesianGrid stroke="#e6edf2" strokeDasharray="3 3" />
           <XAxis dataKey="shortName" tick={{ fontSize: 11 }} />
           <YAxis yAxisId="left" allowDecimals={false} tick={{ fontSize: 11 }} />
-          <YAxis yAxisId="right" orientation="right" allowDecimals={false} tick={{ fontSize: 11 }} />
           <Tooltip formatter={(value, name) => [formatNumber(value), name]} />
           <Legend />
           <Bar yAxisId="left" dataKey="current_count" name="Conteo actual" fill={CHART_COLORS.occupancy} radius={[6, 6, 0, 0]} />
-          <Line yAxisId="right" type="monotone" dataKey="error_count" name="Errores" stroke={CHART_COLORS.offline} strokeWidth={2} />
         </ComposedChart>
       </ResponsiveContainer>
     </div>
